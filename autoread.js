@@ -23,6 +23,7 @@ const AutoReadCore = (() => {
   const DEFAULT_TOPIC_LIST_LIMIT = 100;
   const DEFAULT_MAX_TOPIC_PAGES = 10;
   const DEFAULT_READING_QUEUE_STORAGE_KEY = "readingQueue";
+  const DEFAULT_AUTO_LIKE_STORAGE_KEY = "autoLikeEnabled";
   const DEFAULT_TOPIC_COMPLETION_TOLERANCE = 100;
   const DEFAULT_SESSION_LABELS = {
     start: "开始阅读",
@@ -81,6 +82,29 @@ const AutoReadCore = (() => {
           storageKey,
           JSON.stringify(Array.isArray(queue) ? queue : [])
         );
+      },
+    };
+  }
+
+  function createAutoLikeController({
+    storage,
+    storageKey = DEFAULT_AUTO_LIKE_STORAGE_KEY,
+  }) {
+    return {
+      isEnabled() {
+        return storage.getItem(storageKey) === "true";
+      },
+
+      setEnabled(enabled) {
+        storage.setItem(storageKey, enabled ? "true" : "false");
+      },
+
+      runIfEnabled(run) {
+        if (storage.getItem(storageKey) !== "true") {
+          return { status: "disabled" };
+        }
+
+        return { status: "ran", result: run() };
       },
     };
   }
@@ -331,12 +355,14 @@ const AutoReadCore = (() => {
 
   return {
     DEFAULT_CANDIDATE_SOURCES,
+    DEFAULT_AUTO_LIKE_STORAGE_KEY,
     DEFAULT_COMMENT_LIMIT,
     DEFAULT_MAX_TOPIC_PAGES,
     DEFAULT_READING_QUEUE_STORAGE_KEY,
     DEFAULT_TOPIC_COMPLETION_TOLERANCE,
     DEFAULT_TOPIC_LIST_LIMIT,
     continueTopicReading,
+    createAutoLikeController,
     createAutoReadingSession,
     buildTopicUrl,
     buildReadingQueue,
@@ -384,6 +410,9 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       readingQueueStorage.set(queue);
     },
   };
+  const autoLikeController = AutoReadCore.createAutoLikeController({
+    storage: localStorage,
+  });
   const topicSources = AutoReadCore.DEFAULT_CANDIDATE_SOURCES;
   // 获取当前页面的URL
   const currentURL = window.location.href;
@@ -417,7 +446,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   // 更新初始数据的函数
   function updateInitialData() {
     localStorage.setItem("read", "false"); // 开始时自动滚动关闭
-    localStorage.setItem("autoLikeEnabled", "false"); //默认关闭自动点赞
+    autoLikeController.setEnabled(false); //默认关闭自动点赞
     console.log("执行了初始数据更新操作");
   }
   const delay = 2000; // 滚动检查的间隔（毫秒）
@@ -571,7 +600,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       "autoRead",
       localStorage.getItem("read"),
       "autoLikeEnabled",
-      localStorage.getItem("autoLikeEnabled")
+      autoLikeController.isEnabled()
     );
     if (isReadingEnabled()) {
       console.log("执行正常的滚动和检查逻辑");
@@ -580,9 +609,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       } else {
         openNewTopic();
       }
-      if (isAutoLikeEnabled()) {
-        autoLike();
-      }
+      autoLikeController.runIfEnabled(autoLike);
     }
   }
 
@@ -720,7 +747,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   //自动点赞按钮
   // 在页面上添加一个控制自动点赞的按钮
   const toggleAutoLikeButton = document.createElement("button");
-  toggleAutoLikeButton.textContent = isAutoLikeEnabled()
+  toggleAutoLikeButton.textContent = autoLikeController.isEnabled()
     ? "禁用自动点赞"
     : "启用自动点赞";
   toggleAutoLikeButton.style.position = "fixed";
@@ -736,22 +763,12 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
 
   // 为按钮添加点击事件处理函数
   toggleAutoLikeButton.addEventListener("click", () => {
-    const isEnabled = !isAutoLikeEnabled();
-    setAutoLikeEnabled(isEnabled);
+    const isEnabled = !autoLikeController.isEnabled();
+    autoLikeController.setEnabled(isEnabled);
     toggleAutoLikeButton.textContent = isEnabled
       ? "禁用自动点赞"
       : "启用自动点赞";
   });
-  // 判断是否启用自动点赞
-  function isAutoLikeEnabled() {
-    // 只有用户明确启用时才自动点赞
-    return localStorage.getItem("autoLikeEnabled") === "true";
-  }
-
-  // 设置自动点赞的启用状态
-  function setAutoLikeEnabled(enabled) {
-    localStorage.setItem("autoLikeEnabled", enabled ? "true" : "false");
-  }
 
   if (document.readyState === "loading") {
     window.addEventListener("load", initAutoRead);
