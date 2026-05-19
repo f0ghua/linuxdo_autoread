@@ -17,7 +17,109 @@
 // @updateURL https://update.greasyfork.org/scripts/489464/Auto%20Read.meta.js
 // ==/UserScript==
 
-(function () {
+const AutoReadCore = (() => {
+  const DEFAULT_CANDIDATE_SOURCES = ["unread", "new"];
+  const DEFAULT_COMMENT_LIMIT = 1000;
+  const DEFAULT_TOPIC_LIST_LIMIT = 100;
+  const DEFAULT_MAX_TOPIC_PAGES = 10;
+
+  function getTopicsFromTopicListPayload(payload) {
+    if (
+      payload &&
+      payload.topic_list &&
+      Array.isArray(payload.topic_list.topics)
+    ) {
+      return payload.topic_list.topics;
+    }
+
+    return [];
+  }
+
+  function isEligibleTopic(topic, commentLimit = DEFAULT_COMMENT_LIMIT) {
+    return Boolean(topic) && topic.posts_count < commentLimit;
+  }
+
+  async function getEligibleTopicsFromSource({
+    source,
+    fetchTopicPage,
+    commentLimit = DEFAULT_COMMENT_LIMIT,
+    maxTopicPages = DEFAULT_MAX_TOPIC_PAGES,
+    topicListLimit = DEFAULT_TOPIC_LIST_LIMIT,
+  }) {
+    let eligibleTopics = [];
+
+    for (let page = 0; page < maxTopicPages; page++) {
+      const result = await fetchTopicPage(source, page);
+      const topics = getTopicsFromTopicListPayload(result);
+
+      if (topics.length === 0) {
+        break;
+      }
+
+      topics.forEach((topic) => {
+        if (isEligibleTopic(topic, commentLimit)) {
+          eligibleTopics.push(topic);
+        }
+      });
+
+      if (eligibleTopics.length >= topicListLimit) {
+        break;
+      }
+    }
+
+    if (eligibleTopics.length > topicListLimit) {
+      eligibleTopics = eligibleTopics.slice(0, topicListLimit);
+    }
+
+    return eligibleTopics;
+  }
+
+  async function selectReadingQueue({
+    fetchTopicPage,
+    candidateSources = DEFAULT_CANDIDATE_SOURCES,
+    commentLimit = DEFAULT_COMMENT_LIMIT,
+    maxTopicPages = DEFAULT_MAX_TOPIC_PAGES,
+    topicListLimit = DEFAULT_TOPIC_LIST_LIMIT,
+  }) {
+    for (const source of candidateSources) {
+      const topics = await getEligibleTopicsFromSource({
+        source,
+        fetchTopicPage,
+        commentLimit,
+        maxTopicPages,
+        topicListLimit,
+      });
+
+      if (topics.length > 0) {
+        return { source, topics };
+      }
+    }
+
+    return { source: null, topics: [] };
+  }
+
+  async function buildReadingQueue(options) {
+    const selectedQueue = await selectReadingQueue(options);
+    return selectedQueue.topics;
+  }
+
+  return {
+    DEFAULT_CANDIDATE_SOURCES,
+    DEFAULT_COMMENT_LIMIT,
+    DEFAULT_MAX_TOPIC_PAGES,
+    DEFAULT_TOPIC_LIST_LIMIT,
+    buildReadingQueue,
+    getEligibleTopicsFromSource,
+    getTopicsFromTopicListPayload,
+    isEligibleTopic,
+    selectReadingQueue,
+  };
+})();
+
+if (typeof module === "object" && module.exports && typeof window === "undefined") {
+  module.exports = AutoReadCore;
+} else {
+  (function () {
   ("use strict");
   // 定义可能的基本URL
   const possibleBaseURLs = [
@@ -27,12 +129,12 @@
     "https://community.openai.com",
     "https://idcflare.com/",
   ];
-  const commentLimit = 1000;
-  const topicListLimit = 100;
-  const maxTopicPages = 10;
+  const commentLimit = AutoReadCore.DEFAULT_COMMENT_LIMIT;
+  const topicListLimit = AutoReadCore.DEFAULT_TOPIC_LIST_LIMIT;
+  const maxTopicPages = AutoReadCore.DEFAULT_MAX_TOPIC_PAGES;
   const likeLimit = 50;
   const readingQueueStorageKey = "readingQueue";
-  const topicSources = ["unread", "new"];
+  const topicSources = AutoReadCore.DEFAULT_CANDIDATE_SOURCES;
   // 获取当前页面的URL
   const currentURL = window.location.href;
 
@@ -169,47 +271,31 @@
   }
 
   async function getTopicsFromSource(source) {
-    let topicList = [];
-
-    for (let page = 0; page < maxTopicPages; page++) {
-      const result = await fetchTopicPage(source, page);
-      const topics =
-        result && result.topic_list && Array.isArray(result.topic_list.topics)
-          ? result.topic_list.topics
-          : [];
-
-      if (topics.length === 0) {
-        break;
-      }
-
-      topics.forEach((topic) => {
-        if (commentLimit > topic.posts_count) {
-          topicList.push(topic);
-        }
-      });
-
-      if (topicList.length >= topicListLimit) {
-        break;
-      }
-    }
-
-    if (topicList.length > topicListLimit) {
-      topicList = topicList.slice(0, topicListLimit);
-    }
-
-    return topicList;
+    return AutoReadCore.getEligibleTopicsFromSource({
+      source,
+      fetchTopicPage,
+      commentLimit,
+      maxTopicPages,
+      topicListLimit,
+    });
   }
 
   async function getReadingQueue() {
-    for (const source of topicSources) {
-      const topics = await getTopicsFromSource(source);
-      if (topics.length > 0) {
-        console.log(`从 ${source}.json 获取到 ${topics.length} 个主题`);
-        return topics;
-      }
+    const selectedQueue = await AutoReadCore.selectReadingQueue({
+      fetchTopicPage,
+      candidateSources: topicSources,
+      commentLimit,
+      maxTopicPages,
+      topicListLimit,
+    });
+
+    if (selectedQueue.topics.length > 0) {
+      console.log(
+        `从 ${selectedQueue.source}.json 获取到 ${selectedQueue.topics.length} 个主题`
+      );
     }
 
-    return [];
+    return selectedQueue.topics;
   }
 
   async function openNewTopic() {
@@ -449,3 +535,4 @@
     initAutoRead();
   }
 })();
+}
