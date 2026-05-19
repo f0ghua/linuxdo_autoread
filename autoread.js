@@ -23,6 +23,14 @@ const AutoReadCore = (() => {
   const DEFAULT_TOPIC_LIST_LIMIT = 100;
   const DEFAULT_MAX_TOPIC_PAGES = 10;
   const DEFAULT_READING_QUEUE_STORAGE_KEY = "readingQueue";
+  const DEFAULT_SESSION_LABELS = {
+    start: "开始阅读",
+    stop: "停止阅读",
+  };
+  const DEFAULT_SESSION_MESSAGES = {
+    genericError: "读取未读主题失败，请稍后重试。",
+    noTopics: "没有未读或新主题，已停止自动阅读。",
+  };
 
   function normalizeBaseUrl(baseUrl) {
     return String(baseUrl).replace(/\/+$/, "");
@@ -181,12 +189,116 @@ const AutoReadCore = (() => {
     return selectedQueue.topics;
   }
 
+  function createAutoReadingSession({
+    baseUrl,
+    getActiveState,
+    setActiveState,
+    getReadingQueue,
+    navigateTo,
+    readingQueueStorage,
+    clearTimers = () => {},
+    setControlLabel = () => {},
+    setControlTitle = () => {},
+    showUserMessage = () => {},
+    logDiagnostic = () => {},
+    labels = {},
+    messages = {},
+  }) {
+    const sessionLabels = {
+      ...DEFAULT_SESSION_LABELS,
+      ...labels,
+    };
+    const sessionMessages = {
+      ...DEFAULT_SESSION_MESSAGES,
+      ...messages,
+    };
+
+    function isActive() {
+      return getActiveState() === true;
+    }
+
+    function isLoginRequiredError(error) {
+      return error && error.name === "LoginRequiredError";
+    }
+
+    async function advance() {
+      if (!isActive()) {
+        return { status: "inactive" };
+      }
+
+      clearTimers();
+
+      let result;
+      try {
+        result = await openNextQueuedTopic({
+          baseUrl,
+          getReadingQueue,
+          navigateTo,
+          readingQueueStorage,
+        });
+      } catch (error) {
+        const loginRequired = isLoginRequiredError(error);
+
+        logDiagnostic("Auto-Reading Session Error", error);
+        stop(loginRequired ? error.message : sessionMessages.genericError, {
+          visible: loginRequired,
+        });
+
+        return { status: "error", error };
+      }
+
+      if (result.status === "empty") {
+        return stop(sessionMessages.noTopics);
+      }
+
+      return result;
+    }
+
+    async function start() {
+      setActiveState(true);
+      readingQueueStorage.clear();
+      setControlTitle("");
+      setControlLabel(sessionLabels.stop);
+
+      return advance();
+    }
+
+    function stop(message, options = {}) {
+      setActiveState(false);
+      readingQueueStorage.clear();
+      clearTimers();
+      setControlLabel(sessionLabels.start);
+
+      if (message) {
+        setControlTitle(message);
+        if (options.visible) {
+          showUserMessage(message);
+        }
+      }
+
+      return { status: "stopped" };
+    }
+
+    function toggle() {
+      return isActive() ? stop() : start();
+    }
+
+    return {
+      advance,
+      isActive,
+      start,
+      stop,
+      toggle,
+    };
+  }
+
   return {
     DEFAULT_CANDIDATE_SOURCES,
     DEFAULT_COMMENT_LIMIT,
     DEFAULT_MAX_TOPIC_PAGES,
     DEFAULT_READING_QUEUE_STORAGE_KEY,
     DEFAULT_TOPIC_LIST_LIMIT,
+    createAutoReadingSession,
     buildTopicUrl,
     buildReadingQueue,
     createReadingQueueStorage,
@@ -220,6 +332,18 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   const readingQueueStorage = AutoReadCore.createReadingQueueStorage({
     storage: localStorage,
   });
+  const sessionReadingQueueStorage = {
+    clear() {
+      readingQueueStorage.clear();
+      localStorage.removeItem("topicList");
+    },
+    get() {
+      return readingQueueStorage.get();
+    },
+    set(queue) {
+      readingQueueStorage.set(queue);
+    },
+  };
   const topicSources = AutoReadCore.DEFAULT_CANDIDATE_SOURCES;
   // 获取当前页面的URL
   const currentURL = window.location.href;
@@ -282,21 +406,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     localStorage.removeItem("navigatingToNextTopic");
   }
 
-  function stopAutoRead(message, alertUser = false) {
-    localStorage.setItem("read", "false");
-    readingQueueStorage.clear();
-    localStorage.removeItem("topicList");
-    clearReadTimers();
-    button.textContent = "开始阅读";
-
-    if (message) {
-      button.title = message;
-      console.warn(message);
-      if (alertUser) {
-        window.alert(message);
-      }
-    }
-  }
+  let autoReadingSession = null;
 
   function scrollToBottomSlowly(distancePerStep = 20, delayPerStep = 100) {
     if (scrollInterval !== null) {
@@ -370,30 +480,8 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     }
 
     openingTopic = true;
-    clearReadTimers();
-
     try {
-      const result = await AutoReadCore.openNextQueuedTopic({
-        baseUrl: BASE_URL,
-        getReadingQueue,
-        navigateTo: (url) => {
-          localStorage.setItem("navigatingToNextTopic", "true");
-          window.location.href = url;
-        },
-        readingQueueStorage,
-      });
-
-      if (result.status === "empty") {
-        stopAutoRead("没有未读或新主题，已停止自动阅读。");
-      }
-    } catch (error) {
-      console.error("打开下一个主题失败", error);
-      stopAutoRead(
-        error.name === "LoginRequiredError"
-          ? error.message
-          : "读取未读主题失败，请稍后重试。",
-        error.name === "LoginRequiredError"
-      );
+      await autoReadingSession.advance();
     } finally {
       openingTopic = false;
     }
@@ -537,19 +625,38 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   button.style.borderRadius = "5px"; // 圆角
   document.body.appendChild(button);
 
+  autoReadingSession = AutoReadCore.createAutoReadingSession({
+    baseUrl: BASE_URL,
+    getActiveState: isReadingEnabled,
+    setActiveState: (active) => {
+      localStorage.setItem("read", active.toString());
+    },
+    getReadingQueue,
+    navigateTo: (url) => {
+      localStorage.setItem("navigatingToNextTopic", "true");
+      window.location.href = url;
+    },
+    readingQueueStorage: sessionReadingQueueStorage,
+    clearTimers: clearReadTimers,
+    setControlLabel: (label) => {
+      button.textContent = label;
+    },
+    setControlTitle: (message) => {
+      button.title = message;
+      if (message) {
+        console.warn(message);
+      }
+    },
+    showUserMessage: (message) => {
+      window.alert(message);
+    },
+    logDiagnostic: (message, error) => {
+      console.error(message, error);
+    },
+  });
+
   button.onclick = function () {
-    const currentlyReading = isReadingEnabled();
-    const newReadState = !currentlyReading;
-    localStorage.setItem("read", newReadState.toString());
-    button.textContent = newReadState ? "停止阅读" : "开始阅读";
-    if (!newReadState) {
-      stopAutoRead();
-    } else {
-      button.title = "";
-      readingQueueStorage.clear();
-      localStorage.removeItem("topicList");
-      openNewTopic();
-    }
+    autoReadingSession.toggle();
   };
 
   //自动点赞按钮
