@@ -1,6 +1,6 @@
 # Run Tampermonkey Live Verification via Chrome DevTools
 
-Status: needs-info
+Status: done
 Type: AFK
 User stories covered: 29, 30, plus end-to-end reader behavior
 
@@ -12,15 +12,15 @@ This issue is AFK because the user has already logged in to the Chrome DevTools 
 
 ## Acceptance criteria
 
-- [ ] Tampermonkey has the current userscript installed or updated.
-- [ ] The script runs on logged-in linux.do pages through the Chrome DevTools session.
-- [ ] The Auto Read controls appear and reflect idle versus active state.
-- [ ] The script can access unread/new Candidate Sources while logged in.
-- [ ] Starting an Auto-Reading Session opens an Eligible Topic at the expected Read Position or beginning fallback.
-- [ ] Topic scrolling and advancement are observed without posting, replying, or editing content.
-- [ ] Stopping the session stops navigation/scrolling and clears session state.
-- [ ] Auto-like remains off unless explicitly enabled.
-- [ ] Any Cloudflare, human verification, or lost-login state is reported as blocked with `needs-info`.
+- [x] Tampermonkey has the current userscript installed or updated.
+- [x] The script runs on logged-in linux.do pages through the Chrome DevTools session.
+- [x] The Auto Read controls appear and reflect idle versus active state.
+- [x] The script can access unread/new Candidate Sources while logged in.
+- [x] Starting an Auto-Reading Session opens an Eligible Topic at the expected Read Position or beginning fallback.
+- [x] Topic scrolling and advancement are observed without posting, replying, or editing content.
+- [x] Stopping the session stops navigation/scrolling and clears session state.
+- [x] Auto-like remains off unless explicitly enabled.
+- [x] Any Cloudflare, human verification, or lost-login state is reported as blocked with `needs-info`.
 
 ## Blocked by
 
@@ -51,3 +51,23 @@ Blocked:
 
 - After resetting the session, `https://linux.do/` displayed a Cloudflare Turnstile human verification page titled `Just a moment...` with a `Verify you are human` checkbox. Per this issue's instructions, verification stopped here rather than attempting to bypass the challenge.
 - Normal UI-based Stop Reading verification on a non-challenge linux.do page remains unverified because the Cloudflare challenge appeared before that final check could be completed.
+
+### 2026-05-19 Live verification resumed and completed
+
+Cloudflare verification had cleared when the Chrome DevTools session was resumed.
+
+Verified:
+
+- Reloaded/inspected the logged-in `https://linux.do/` page and confirmed the userscript controls were visible in the idle state: `开始阅读` and `启用自动点赞`.
+- Confirmed local session state was idle and auto-like remained opt-out before starting: `read=false`, `autoLikeEnabled=false`, no persisted `readingQueue`, no persisted `topicList`, and no `navigatingToNextTopic`.
+- Confirmed same-origin logged-in access to both Candidate Sources:
+  - `unread.json?no_definitions=true&page=0` returned HTTP 200 and 30 topics.
+  - `new.json?no_definitions=true&page=0` returned HTTP 200 and 30 topics.
+- Started an Auto-Reading Session from the visible userscript control and observed the control switch to `停止阅读`.
+- Observed navigation to an eligible topic at a Discourse read-position URL: `https://linux.do/t/topic/2098158/37`.
+- Observed automated topic scrolling while the session was active: `scrollY` advanced from `2435.333251953125` to `3075.333251953125` over the observation window.
+- Confirmed auto-like remained disabled during the active session: `autoLikeEnabled=false`.
+- Stopped the session through the visible `停止阅读` control and confirmed the controls returned to idle: `开始阅读` and `启用自动点赞`.
+- Confirmed session state cleared after Stop Reading: `read=false`, no persisted `readingQueue`, no persisted `topicList`, no `navigatingToNextTopic`.
+- Confirmed scrolling did not continue after Stop Reading: `scrollY` remained `4375.33349609375` after the observation window.
+- No posting, replying, or editing controls were used. Observed network traffic included Discourse timing/read-tracking requests, analytics, message bus polling, and Cloudflare challenge background checks, but no content creation or edit workflow was exercised.
