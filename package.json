@@ -3,6 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "typecheck": "node --check autoread.js && node --check test/readingQueue.test.js && node --check test/topicNavigation.test.js"
   }
 }

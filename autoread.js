@@ -22,6 +22,84 @@ const AutoReadCore = (() => {
   const DEFAULT_COMMENT_LIMIT = 1000;
   const DEFAULT_TOPIC_LIST_LIMIT = 100;
   const DEFAULT_MAX_TOPIC_PAGES = 10;
+  const DEFAULT_READING_QUEUE_STORAGE_KEY = "readingQueue";
+
+  function normalizeBaseUrl(baseUrl) {
+    return String(baseUrl).replace(/\/+$/, "");
+  }
+
+  function getReadPosition(topic) {
+    const readPosition = topic && topic.last_read_post_number;
+
+    return Number.isInteger(readPosition) && readPosition > 0
+      ? readPosition
+      : null;
+  }
+
+  function buildTopicUrl({ baseUrl, topic }) {
+    const topicUrl = `${normalizeBaseUrl(baseUrl)}/t/topic/${topic.id}`;
+    const readPosition = getReadPosition(topic);
+
+    return readPosition === null ? topicUrl : `${topicUrl}/${readPosition}`;
+  }
+
+  function createReadingQueueStorage({
+    storage,
+    storageKey = DEFAULT_READING_QUEUE_STORAGE_KEY,
+  }) {
+    return {
+      clear() {
+        storage.removeItem(storageKey);
+      },
+
+      get() {
+        const queueStr = storage.getItem(storageKey);
+        if (!queueStr) {
+          return [];
+        }
+
+        try {
+          const queue = JSON.parse(queueStr);
+          return Array.isArray(queue) ? queue : [];
+        } catch (error) {
+          storage.removeItem(storageKey);
+          return [];
+        }
+      },
+
+      set(queue) {
+        storage.setItem(
+          storageKey,
+          JSON.stringify(Array.isArray(queue) ? queue : [])
+        );
+      },
+    };
+  }
+
+  async function openNextQueuedTopic({
+    baseUrl,
+    getReadingQueue,
+    navigateTo,
+    readingQueueStorage,
+  }) {
+    let readingQueue = readingQueueStorage.get();
+
+    if (readingQueue.length === 0) {
+      readingQueue = await getReadingQueue();
+    }
+
+    if (readingQueue.length === 0) {
+      return { status: "empty" };
+    }
+
+    const topic = readingQueue.shift();
+    readingQueueStorage.set(readingQueue);
+
+    const url = buildTopicUrl({ baseUrl, topic });
+    navigateTo(url);
+
+    return { status: "opened", topic, url };
+  }
 
   function getTopicsFromTopicListPayload(payload) {
     if (
@@ -107,11 +185,17 @@ const AutoReadCore = (() => {
     DEFAULT_CANDIDATE_SOURCES,
     DEFAULT_COMMENT_LIMIT,
     DEFAULT_MAX_TOPIC_PAGES,
+    DEFAULT_READING_QUEUE_STORAGE_KEY,
     DEFAULT_TOPIC_LIST_LIMIT,
+    buildTopicUrl,
     buildReadingQueue,
+    createReadingQueueStorage,
     getEligibleTopicsFromSource,
+    getReadPosition,
     getTopicsFromTopicListPayload,
     isEligibleTopic,
+    normalizeBaseUrl,
+    openNextQueuedTopic,
     selectReadingQueue,
   };
 })();
@@ -133,7 +217,9 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   const topicListLimit = AutoReadCore.DEFAULT_TOPIC_LIST_LIMIT;
   const maxTopicPages = AutoReadCore.DEFAULT_MAX_TOPIC_PAGES;
   const likeLimit = 50;
-  const readingQueueStorageKey = "readingQueue";
+  const readingQueueStorage = AutoReadCore.createReadingQueueStorage({
+    storage: localStorage,
+  });
   const topicSources = AutoReadCore.DEFAULT_CANDIDATE_SOURCES;
   // 获取当前页面的URL
   const currentURL = window.location.href;
@@ -184,26 +270,6 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     return /^\/t\/[^/]+\/\d+(?:\/\d+)?\/?$/.test(window.location.pathname);
   }
 
-  function getStoredReadingQueue() {
-    const queueStr = localStorage.getItem(readingQueueStorageKey);
-    if (!queueStr) {
-      return [];
-    }
-
-    try {
-      const queue = JSON.parse(queueStr);
-      return Array.isArray(queue) ? queue : [];
-    } catch (error) {
-      console.error("读取阅读队列失败，已清空队列", error);
-      localStorage.removeItem(readingQueueStorageKey);
-      return [];
-    }
-  }
-
-  function setStoredReadingQueue(queue) {
-    localStorage.setItem(readingQueueStorageKey, JSON.stringify(queue));
-  }
-
   function clearReadTimers() {
     if (scrollInterval !== null) {
       clearInterval(scrollInterval);
@@ -218,7 +284,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
 
   function stopAutoRead(message, alertUser = false) {
     localStorage.setItem("read", "false");
-    localStorage.removeItem(readingQueueStorageKey);
+    readingQueueStorage.clear();
     localStorage.removeItem("topicList");
     clearReadTimers();
     button.textContent = "开始阅读";
@@ -307,25 +373,18 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     clearReadTimers();
 
     try {
-      let readingQueue = getStoredReadingQueue();
+      const result = await AutoReadCore.openNextQueuedTopic({
+        baseUrl: BASE_URL,
+        getReadingQueue,
+        navigateTo: (url) => {
+          localStorage.setItem("navigatingToNextTopic", "true");
+          window.location.href = url;
+        },
+        readingQueueStorage,
+      });
 
-      if (readingQueue.length === 0) {
-        readingQueue = await getReadingQueue();
-      }
-
-      if (readingQueue.length === 0) {
+      if (result.status === "empty") {
         stopAutoRead("没有未读或新主题，已停止自动阅读。");
-        return;
-      }
-
-      const topic = readingQueue.shift();
-      setStoredReadingQueue(readingQueue);
-      localStorage.setItem("navigatingToNextTopic", "true");
-
-      if (topic.last_read_post_number) {
-        window.location.href = `${BASE_URL}/t/topic/${topic.id}/${topic.last_read_post_number}`;
-      } else {
-        window.location.href = `${BASE_URL}/t/topic/${topic.id}`;
       }
     } catch (error) {
       console.error("打开下一个主题失败", error);
@@ -487,7 +546,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       stopAutoRead();
     } else {
       button.title = "";
-      localStorage.removeItem(readingQueueStorageKey);
+      readingQueueStorage.clear();
       localStorage.removeItem("topicList");
       openNewTopic();
     }
