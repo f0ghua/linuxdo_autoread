@@ -23,6 +23,7 @@ const AutoReadCore = (() => {
   const DEFAULT_TOPIC_LIST_LIMIT = 100;
   const DEFAULT_MAX_TOPIC_PAGES = 10;
   const DEFAULT_READING_QUEUE_STORAGE_KEY = "readingQueue";
+  const DEFAULT_TOPIC_COMPLETION_TOLERANCE = 100;
   const DEFAULT_SESSION_LABELS = {
     start: "开始阅读",
     stop: "停止阅读",
@@ -189,6 +190,42 @@ const AutoReadCore = (() => {
     return selectedQueue.topics;
   }
 
+  function isTopicCompletionReached({
+    viewportHeight,
+    scrollY,
+    documentHeight,
+    tolerance = DEFAULT_TOPIC_COMPLETION_TOLERANCE,
+  }) {
+    return viewportHeight + scrollY >= documentHeight - tolerance;
+  }
+
+  async function continueTopicReading({
+    isActive,
+    getViewportMetrics,
+    scrollTopic,
+    scheduleNextCheck,
+    advanceSession,
+    tolerance,
+  }) {
+    if (!isActive()) {
+      return { status: "inactive" };
+    }
+
+    if (
+      isTopicCompletionReached({
+        ...getViewportMetrics(),
+        tolerance,
+      })
+    ) {
+      const advanceResult = await advanceSession();
+      return { status: "completed", advanceResult };
+    }
+
+    scrollTopic();
+    scheduleNextCheck();
+    return { status: "scrolling" };
+  }
+
   function createAutoReadingSession({
     baseUrl,
     getActiveState,
@@ -297,7 +334,9 @@ const AutoReadCore = (() => {
     DEFAULT_COMMENT_LIMIT,
     DEFAULT_MAX_TOPIC_PAGES,
     DEFAULT_READING_QUEUE_STORAGE_KEY,
+    DEFAULT_TOPIC_COMPLETION_TOLERANCE,
     DEFAULT_TOPIC_LIST_LIMIT,
+    continueTopicReading,
     createAutoReadingSession,
     buildTopicUrl,
     buildReadingQueue,
@@ -305,6 +344,7 @@ const AutoReadCore = (() => {
     getEligibleTopicsFromSource,
     getReadPosition,
     getTopicsFromTopicListPayload,
+    isTopicCompletionReached,
     isEligibleTopic,
     normalizeBaseUrl,
     openNextQueuedTopic,
@@ -476,34 +516,52 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
 
   async function openNewTopic() {
     if (openingTopic) {
-      return;
+      return { status: "opening" };
     }
 
     openingTopic = true;
     try {
-      await autoReadingSession.advance();
+      return await autoReadingSession.advance();
     } finally {
       openingTopic = false;
     }
   }
 
+  function getRenderedDocumentHeight() {
+    return Math.max(
+      document.body ? document.body.offsetHeight : 0,
+      document.body ? document.body.scrollHeight : 0,
+      document.documentElement ? document.documentElement.clientHeight : 0,
+      document.documentElement ? document.documentElement.offsetHeight : 0,
+      document.documentElement ? document.documentElement.scrollHeight : 0
+    );
+  }
+
+  function getViewportMetrics() {
+    return {
+      viewportHeight: window.innerHeight,
+      scrollY: window.scrollY,
+      documentHeight: getRenderedDocumentHeight(),
+    };
+  }
+
   // 检查是否已滚动到底部(不断重复执行),到底部时跳转到下一个话题
   function checkScroll() {
-    if (isReadingEnabled()) {
-      if (
-        window.innerHeight + window.scrollY >=
-        document.body.offsetHeight - 100
-      ) {
-        console.log("已滚动到底部");
-        openNewTopic();
-      } else {
-        scrollToBottomSlowly();
+    AutoReadCore.continueTopicReading({
+      isActive: isReadingEnabled,
+      getViewportMetrics,
+      scrollTopic: scrollToBottomSlowly,
+      scheduleNextCheck: () => {
         if (checkScrollTimeout !== null) {
           clearTimeout(checkScrollTimeout);
         }
         checkScrollTimeout = setTimeout(checkScroll, delay);
-      }
-    }
+      },
+      advanceSession: () => {
+        console.log("已滚动到底部");
+        return openNewTopic();
+      },
+    });
   }
 
   // 入口函数
