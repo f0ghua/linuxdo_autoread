@@ -225,6 +225,7 @@ const AutoReadCore = (() => {
 
   async function continueTopicReading({
     isActive,
+    isTopicReady = () => true,
     getViewportMetrics,
     scrollTopic,
     scheduleNextCheck,
@@ -233,6 +234,11 @@ const AutoReadCore = (() => {
   }) {
     if (!isActive()) {
       return { status: "inactive" };
+    }
+
+    if (!isTopicReady()) {
+      scheduleNextCheck();
+      return { status: "waiting" };
     }
 
     if (
@@ -574,10 +580,19 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     };
   }
 
+  function isTopicContentReady() {
+    return Boolean(
+      document.querySelector(
+        ".topic-post, article[data-post-id], .post-stream .topic-body"
+      )
+    );
+  }
+
   // 检查是否已滚动到底部(不断重复执行),到底部时跳转到下一个话题
   function checkScroll() {
     AutoReadCore.continueTopicReading({
       isActive: isReadingEnabled,
+      isTopicReady: isTopicContentReady,
       getViewportMetrics,
       scrollTopic: scrollToBottomSlowly,
       scheduleNextCheck: () => {

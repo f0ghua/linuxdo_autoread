@@ -53,6 +53,32 @@ test("Active Auto-Reading Session scrolls the current Topic before Topic Complet
   assert.equal(advanceCalls, 0);
 });
 
+test("Topic pages wait for rendered Posts before Topic Completion can advance", async () => {
+  let scheduledChecks = 0;
+  let advanceCalls = 0;
+
+  const result = await continueTopicReading({
+    isActive: () => true,
+    isTopicReady: () => false,
+    getViewportMetrics: () => {
+      throw new Error("Unreadiness should be checked before viewport metrics");
+    },
+    scrollTopic: () => {
+      throw new Error("Unrendered Topics should not scroll");
+    },
+    scheduleNextCheck: () => {
+      scheduledChecks += 1;
+    },
+    advanceSession: () => {
+      advanceCalls += 1;
+    },
+  });
+
+  assert.equal(result.status, "waiting");
+  assert.equal(scheduledChecks, 1);
+  assert.equal(advanceCalls, 0);
+});
+
 test("Topic Completion advances the Auto-Reading Session to the next queued Eligible Topic", async () => {
   let active = true;
   const openedUrls = [];
