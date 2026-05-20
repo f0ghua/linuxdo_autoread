@@ -131,6 +131,7 @@ test("Auto-like state does not change Topic navigation, Topic Completion, or sto
     const readingQueueStorage = createReadingQueueStorage({ storage });
     let active = false;
     let clearTimerCalls = 0;
+    let scheduledCompletion = null;
     const labels = [];
     const openedUrls = [];
 
@@ -172,8 +173,12 @@ test("Auto-like state does not change Topic navigation, Topic Completion, or sto
       scheduleNextCheck: () => {
         throw new Error("Completed Topics should not schedule checks");
       },
+      scheduleTopicCompletion: (delayMs, advance) => {
+        scheduledCompletion = { delayMs, advance };
+      },
       advanceSession: session.advance,
     });
+    const completionAdvanceResult = await scheduledCompletion.advance();
     const stopResult = session.stop();
 
     return {
@@ -186,7 +191,8 @@ test("Auto-like state does not change Topic navigation, Topic Completion, or sto
         queue: readingQueueStorage.get(),
         startStatus: startResult.status,
         completionStatus: completionResult.status,
-        completionAdvanceStatus: completionResult.advanceResult.status,
+        completionDelayMs: completionResult.delayMs,
+        completionAdvanceStatus: completionAdvanceResult.status,
         stopStatus: stopResult.status,
       },
     };
@@ -208,7 +214,8 @@ test("Auto-like state does not change Topic navigation, Topic Completion, or sto
     ],
     queue: [],
     startStatus: "opened",
-    completionStatus: "completed",
+    completionStatus: "waiting-bottom",
+    completionDelayMs: 10000,
     completionAdvanceStatus: "opened",
     stopStatus: "stopped",
   });

@@ -31,6 +31,7 @@ const AutoReadCore = (() => {
     minScrollDelayMs: 250,
     maxScrollDelayMs: 600,
     topicStartDelayMs: 5000,
+    bottomDelayMs: 10000,
   };
   const DEFAULT_SESSION_LABELS = {
     start: "开始阅读",
@@ -288,6 +289,7 @@ const AutoReadCore = (() => {
     getViewportMetrics,
     scrollTopic,
     scheduleNextCheck,
+    scheduleTopicCompletion = () => {},
     advanceSession,
     shouldDelayTopicStart = () => false,
     recordTopicStartDelay = () => {},
@@ -309,7 +311,10 @@ const AutoReadCore = (() => {
     if (shouldDelayTopicStart()) {
       recordTopicStartDelay();
       scheduleNextCheck(profile.topicStartDelayMs);
-      return { status: "waiting-topic-start", delayMs: profile.topicStartDelayMs };
+      return {
+        status: "waiting-topic-start",
+        delayMs: profile.topicStartDelayMs,
+      };
     }
 
     if (
@@ -318,8 +323,8 @@ const AutoReadCore = (() => {
         tolerance,
       })
     ) {
-      const advanceResult = await advanceSession();
-      return { status: "completed", advanceResult };
+      scheduleTopicCompletion(profile.bottomDelayMs, advanceSession);
+      return { status: "waiting-bottom", delayMs: profile.bottomDelayMs };
     }
 
     const scrollAction = chooseScrollAction({ readingProfile, random });
@@ -673,6 +678,17 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
           clearTimeout(checkScrollTimeout);
         }
         checkScrollTimeout = setTimeout(checkScroll, delayMs);
+      },
+      scheduleTopicCompletion: (delayMs, advance) => {
+        if (checkScrollTimeout !== null) {
+          clearTimeout(checkScrollTimeout);
+        }
+        checkScrollTimeout = setTimeout(() => {
+          checkScrollTimeout = null;
+          Promise.resolve(advance()).catch((error) => {
+            console.error("延迟跳转到下一个主题失败", error);
+          });
+        }, delayMs);
       },
       advanceSession: () => {
         console.log("已滚动到底部");
