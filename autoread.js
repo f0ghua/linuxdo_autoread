@@ -33,6 +33,10 @@ const AutoReadCore = (() => {
     topicStartDelayMs: 5000,
     bottomDelayMs: 10000,
   };
+  const READ_STATE_PAUSE_REASONS = {
+    hiddenTab: "hidden-tab",
+    unfocusedPage: "unfocused-page",
+  };
   const DEFAULT_SESSION_LABELS = {
     start: "开始阅读",
     stop: "停止阅读",
@@ -40,6 +44,8 @@ const AutoReadCore = (() => {
   const DEFAULT_SESSION_MESSAGES = {
     genericError: "读取未读主题失败，请稍后重试。",
     noTopics: "没有未读或新主题，已停止自动阅读。",
+    hiddenTabPause: "页面已隐藏，自动阅读已暂停。",
+    unfocusedPagePause: "页面未聚焦，自动阅读已暂停。",
   };
 
   function normalizeBaseUrl(baseUrl) {
@@ -283,9 +289,37 @@ const AutoReadCore = (() => {
     };
   }
 
+  function createReadStateTrustGuard({
+    isPageHidden = () => false,
+    hasPageFocus = () => true,
+  } = {}) {
+    return {
+      getTrustState() {
+        if (isPageHidden()) {
+          return {
+            trusted: false,
+            reason: READ_STATE_PAUSE_REASONS.hiddenTab,
+          };
+        }
+
+        if (!hasPageFocus()) {
+          return {
+            trusted: false,
+            reason: READ_STATE_PAUSE_REASONS.unfocusedPage,
+          };
+        }
+
+        return { trusted: true };
+      },
+    };
+  }
+
   async function continueTopicReading({
     isActive,
+    getReadStateTrust = () => ({ trusted: true }),
     isTopicReady = () => true,
+    clearTimers = () => {},
+    pauseReading = () => {},
     getViewportMetrics,
     scrollTopic,
     scheduleNextCheck,
@@ -299,6 +333,16 @@ const AutoReadCore = (() => {
   }) {
     if (!isActive()) {
       return { status: "inactive" };
+    }
+
+    const readStateTrust = getReadStateTrust();
+    if (readStateTrust && readStateTrust.trusted === false) {
+      clearTimers();
+      pauseReading(readStateTrust.reason);
+      return {
+        status: "paused",
+        reason: readStateTrust.reason,
+      };
     }
 
     if (!isTopicReady()) {
@@ -338,6 +382,7 @@ const AutoReadCore = (() => {
     baseUrl,
     getActiveState,
     setActiveState,
+    getReadStateTrust = () => ({ trusted: true }),
     getReadingQueue,
     navigateTo,
     readingQueueStorage,
@@ -357,6 +402,7 @@ const AutoReadCore = (() => {
       ...DEFAULT_SESSION_MESSAGES,
       ...messages,
     };
+    let readStatePauseReason = null;
 
     function isActive() {
       return getActiveState() === true;
@@ -366,11 +412,67 @@ const AutoReadCore = (() => {
       return error && error.name === "LoginRequiredError";
     }
 
+    function getPauseMessage(reason) {
+      if (reason === READ_STATE_PAUSE_REASONS.hiddenTab) {
+        return sessionMessages.hiddenTabPause;
+      }
+
+      if (reason === READ_STATE_PAUSE_REASONS.unfocusedPage) {
+        return sessionMessages.unfocusedPagePause;
+      }
+
+      return sessionMessages.genericError;
+    }
+
+    function pause(reason, options = {}) {
+      readStatePauseReason = reason;
+      if (!options.timersAlreadyCleared) {
+        clearTimers();
+      }
+      setControlLabel(sessionLabels.stop);
+      setControlTitle(getPauseMessage(reason));
+
+      return {
+        status: "paused",
+        reason,
+      };
+    }
+
+    function pauseForUntrustedReadState(readStateTrust) {
+      return pause(readStateTrust.reason);
+    }
+
+    function resume() {
+      if (readStatePauseReason === null) {
+        return { status: "active" };
+      }
+
+      readStatePauseReason = null;
+      setControlLabel(sessionLabels.stop);
+      setControlTitle("");
+
+      return { status: "resumed" };
+    }
+
+    function getPauseReason() {
+      return readStatePauseReason;
+    }
+
     async function advance() {
       if (!isActive()) {
         return { status: "inactive" };
       }
 
+      const readStateTrust = getReadStateTrust();
+      if (readStateTrust && readStateTrust.trusted === false) {
+        return pauseForUntrustedReadState(readStateTrust);
+      }
+
+      if (readStatePauseReason !== null) {
+        resume();
+      } else {
+        setControlTitle("");
+      }
       clearTimers();
 
       let result;
@@ -401,6 +503,7 @@ const AutoReadCore = (() => {
 
     async function start() {
       setActiveState(true);
+      readStatePauseReason = null;
       readingQueueStorage.clear();
       setControlTitle("");
       setControlLabel(sessionLabels.stop);
@@ -410,6 +513,7 @@ const AutoReadCore = (() => {
 
     function stop(message, options = {}) {
       setActiveState(false);
+      readStatePauseReason = null;
       readingQueueStorage.clear();
       clearTimers();
       setControlLabel(sessionLabels.start);
@@ -430,7 +534,10 @@ const AutoReadCore = (() => {
 
     return {
       advance,
+      getPauseReason,
       isActive,
+      pause,
+      resume,
       start,
       stop,
       toggle,
@@ -446,9 +553,11 @@ const AutoReadCore = (() => {
     DEFAULT_READING_QUEUE_STORAGE_KEY,
     DEFAULT_TOPIC_COMPLETION_TOLERANCE,
     DEFAULT_TOPIC_LIST_LIMIT,
+    READ_STATE_PAUSE_REASONS,
     continueTopicReading,
     createAutoLikeController,
     createAutoReadingSession,
+    createReadStateTrustGuard,
     createTopicStartDelayController,
     buildTopicUrl,
     buildReadingQueue,
@@ -544,6 +653,11 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     AutoReadCore.createTopicStartDelayController({
       getTopicKey: () => window.location.pathname,
     });
+  const readStateTrustGuard = AutoReadCore.createReadStateTrustGuard({
+    isPageHidden: () => document.hidden === true,
+    hasPageFocus: () =>
+      typeof document.hasFocus === "function" ? document.hasFocus() : true,
+  });
 
   function isReadingEnabled() {
     return localStorage.getItem("read") === "true";
@@ -563,6 +677,32 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   }
 
   let autoReadingSession = null;
+
+  function continueAfterTrustedPageState() {
+    autoReadingSession.resume();
+
+    if (isTopicPage()) {
+      checkScroll();
+    } else {
+      openNewTopic();
+    }
+  }
+
+  function handleReadStateTrustChange() {
+    if (!autoReadingSession || !autoReadingSession.isActive()) {
+      return;
+    }
+
+    const readStateTrust = readStateTrustGuard.getTrustState();
+    if (readStateTrust.trusted === false) {
+      autoReadingSession.pause(readStateTrust.reason);
+      return;
+    }
+
+    if (autoReadingSession.getPauseReason() !== null) {
+      continueAfterTrustedPageState();
+    }
+  }
 
   function scrollTopicOnce(scrollAction) {
     window.scrollBy(0, scrollAction.stepPixels);
@@ -668,6 +808,10 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   function checkScroll() {
     AutoReadCore.continueTopicReading({
       isActive: isReadingEnabled,
+      getReadStateTrust: readStateTrustGuard.getTrustState,
+      clearTimers: clearReadTimers,
+      pauseReading: (reason) =>
+        autoReadingSession.pause(reason, { timersAlreadyCleared: true }),
       isTopicReady: isTopicContentReady,
       shouldDelayTopicStart: topicStartDelayController.shouldDelayTopicStart,
       recordTopicStartDelay: topicStartDelayController.recordTopicStartDelay,
@@ -820,6 +964,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     setActiveState: (active) => {
       localStorage.setItem("read", active.toString());
     },
+    getReadStateTrust: readStateTrustGuard.getTrustState,
     getReadingQueue,
     navigateTo: (url) => {
       localStorage.setItem("navigatingToNextTopic", "true");
@@ -847,6 +992,10 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   button.onclick = function () {
     autoReadingSession.toggle();
   };
+
+  document.addEventListener("visibilitychange", handleReadStateTrustChange);
+  window.addEventListener("focus", handleReadStateTrustChange);
+  window.addEventListener("blur", handleReadStateTrustChange);
 
   //自动点赞按钮
   // 在页面上添加一个控制自动点赞的按钮
