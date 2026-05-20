@@ -4,6 +4,6 @@
   "private": true,
   "scripts": {
     "test": "node --test",
-    "typecheck": "node --check autoread.js && node --check test/readingQueue.test.js && node --check test/topicNavigation.test.js && node --check test/sessionLifecycle.test.js && node --check test/topicCompletion.test.js && node --check test/autoLike.test.js && node --check test/readingProfile.test.js && node --check test/pageStateTrust.test.js"
+    "typecheck": "node --check autoread.js && node --check test/readingQueue.test.js && node --check test/topicNavigation.test.js && node --check test/sessionLifecycle.test.js && node --check test/topicCompletion.test.js && node --check test/autoLike.test.js && node --check test/readingProfile.test.js && node --check test/pageStateTrust.test.js && node --check test/timingFailureTrust.test.js"
   }
 }

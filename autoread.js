@@ -32,9 +32,11 @@ const AutoReadCore = (() => {
     maxScrollDelayMs: 600,
     topicStartDelayMs: 5000,
     bottomDelayMs: 10000,
+    maxConsecutiveTimingFailures: 3,
   };
   const READ_STATE_PAUSE_REASONS = {
     hiddenTab: "hidden-tab",
+    timingFailures: "timing-failures",
     unfocusedPage: "unfocused-page",
   };
   const DEFAULT_SESSION_LABELS = {
@@ -45,6 +47,7 @@ const AutoReadCore = (() => {
     genericError: "读取未读主题失败，请稍后重试。",
     noTopics: "没有未读或新主题，已停止自动阅读。",
     hiddenTabPause: "页面已隐藏，自动阅读已暂停。",
+    timingFailuresPause: "阅读计时请求连续失败，自动阅读已暂停。",
     unfocusedPagePause: "页面未聚焦，自动阅读已暂停。",
   };
 
@@ -292,6 +295,7 @@ const AutoReadCore = (() => {
   function createReadStateTrustGuard({
     isPageHidden = () => false,
     hasPageFocus = () => true,
+    getTimingRequestTrust = () => ({ trusted: true }),
   } = {}) {
     return {
       getTrustState() {
@@ -309,7 +313,162 @@ const AutoReadCore = (() => {
           };
         }
 
+        const timingRequestTrust = getTimingRequestTrust();
+        if (timingRequestTrust && timingRequestTrust.trusted === false) {
+          return timingRequestTrust;
+        }
+
         return { trusted: true };
+      },
+    };
+  }
+
+  function getRequestUrl(request) {
+    if (typeof request === "string") {
+      return request;
+    }
+
+    if (request && typeof request.url === "string") {
+      return request.url;
+    }
+
+    return "";
+  }
+
+  function isTopicTimingRequestUrl(request) {
+    const requestUrl = getRequestUrl(request);
+    if (!requestUrl) {
+      return false;
+    }
+
+    try {
+      const url = new URL(requestUrl, "https://example.invalid");
+      return url.pathname === "/topics/timings";
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function createTimingRequestMonitor({ maxConsecutiveFailures = 3 } = {}) {
+    let consecutiveFailures = 0;
+
+    return {
+      recordFailure(request) {
+        if (!isTopicTimingRequestUrl(request)) {
+          return;
+        }
+
+        consecutiveFailures += 1;
+      },
+
+      recordSuccess(request) {
+        if (!isTopicTimingRequestUrl(request)) {
+          return;
+        }
+
+        consecutiveFailures = 0;
+      },
+
+      getConsecutiveFailures() {
+        return consecutiveFailures;
+      },
+
+      getTrustState() {
+        if (consecutiveFailures >= maxConsecutiveFailures) {
+          return {
+            trusted: false,
+            reason: READ_STATE_PAUSE_REASONS.timingFailures,
+          };
+        }
+
+        return { trusted: true };
+      },
+    };
+  }
+
+  function installTimingRequestMonitor({
+    globalObject,
+    timingMonitor,
+  } = {}) {
+    if (!globalObject || !timingMonitor) {
+      return { uninstall() {} };
+    }
+
+    const uninstallers = [];
+
+    if (typeof globalObject.fetch === "function") {
+      const originalFetch = globalObject.fetch;
+
+      globalObject.fetch = function monitoredFetch(...args) {
+        const request = args[0];
+
+        return Promise.resolve(originalFetch.apply(this, args)).then(
+          (response) => {
+            if (response && response.ok) {
+              timingMonitor.recordSuccess(request);
+            } else {
+              timingMonitor.recordFailure(request);
+            }
+
+            return response;
+          },
+          (error) => {
+            timingMonitor.recordFailure(request);
+            throw error;
+          }
+        );
+      };
+
+      uninstallers.push(() => {
+        globalObject.fetch = originalFetch;
+      });
+    }
+
+    const XMLHttpRequestCtor = globalObject.XMLHttpRequest;
+    if (
+      typeof XMLHttpRequestCtor === "function" &&
+      XMLHttpRequestCtor.prototype &&
+      typeof XMLHttpRequestCtor.prototype.open === "function" &&
+      typeof XMLHttpRequestCtor.prototype.send === "function"
+    ) {
+      const originalOpen = XMLHttpRequestCtor.prototype.open;
+      const originalSend = XMLHttpRequestCtor.prototype.send;
+
+      XMLHttpRequestCtor.prototype.open = function monitoredOpen(...args) {
+        this.__autoReadTimingRequest = args[1];
+        return originalOpen.apply(this, args);
+      };
+
+      XMLHttpRequestCtor.prototype.send = function monitoredSend(...args) {
+        const request = this.__autoReadTimingRequest;
+
+        if (
+          isTopicTimingRequestUrl(request) &&
+          typeof this.addEventListener === "function"
+        ) {
+          this.addEventListener("loadend", () => {
+            if (this.status >= 200 && this.status < 400) {
+              timingMonitor.recordSuccess(request);
+            } else {
+              timingMonitor.recordFailure(request);
+            }
+          });
+        }
+
+        return originalSend.apply(this, args);
+      };
+
+      uninstallers.push(() => {
+        XMLHttpRequestCtor.prototype.open = originalOpen;
+        XMLHttpRequestCtor.prototype.send = originalSend;
+      });
+    }
+
+    return {
+      uninstall() {
+        uninstallers.forEach((uninstall) => {
+          uninstall();
+        });
       },
     };
   }
@@ -415,6 +574,10 @@ const AutoReadCore = (() => {
     function getPauseMessage(reason) {
       if (reason === READ_STATE_PAUSE_REASONS.hiddenTab) {
         return sessionMessages.hiddenTabPause;
+      }
+
+      if (reason === READ_STATE_PAUSE_REASONS.timingFailures) {
+        return sessionMessages.timingFailuresPause;
       }
 
       if (reason === READ_STATE_PAUSE_REASONS.unfocusedPage) {
@@ -558,6 +721,7 @@ const AutoReadCore = (() => {
     createAutoLikeController,
     createAutoReadingSession,
     createReadStateTrustGuard,
+    createTimingRequestMonitor,
     createTopicStartDelayController,
     buildTopicUrl,
     buildReadingQueue,
@@ -566,6 +730,7 @@ const AutoReadCore = (() => {
     getEligibleTopicsFromSource,
     getReadPosition,
     getTopicsFromTopicListPayload,
+    installTimingRequestMonitor,
     isTopicCompletionReached,
     isEligibleTopic,
     normalizeBaseUrl,
@@ -608,6 +773,14 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   };
   const autoLikeController = AutoReadCore.createAutoLikeController({
     storage: localStorage,
+  });
+  const timingRequestMonitor = AutoReadCore.createTimingRequestMonitor({
+    maxConsecutiveFailures:
+      AutoReadCore.DEFAULT_READING_PROFILE.maxConsecutiveTimingFailures,
+  });
+  AutoReadCore.installTimingRequestMonitor({
+    globalObject: window,
+    timingMonitor: timingRequestMonitor,
   });
   const topicSources = AutoReadCore.DEFAULT_CANDIDATE_SOURCES;
   // 获取当前页面的URL
@@ -657,6 +830,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     isPageHidden: () => document.hidden === true,
     hasPageFocus: () =>
       typeof document.hasFocus === "function" ? document.hasFocus() : true,
+    getTimingRequestTrust: timingRequestMonitor.getTrustState,
   });
 
   function isReadingEnabled() {
