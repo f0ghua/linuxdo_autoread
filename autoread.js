@@ -30,6 +30,7 @@ const AutoReadCore = (() => {
     maxScrollStepPixels: 20,
     minScrollDelayMs: 250,
     maxScrollDelayMs: 600,
+    topicStartDelayMs: 5000,
   };
   const DEFAULT_SESSION_LABELS = {
     start: "开始阅读",
@@ -236,21 +237,48 @@ const AutoReadCore = (() => {
     return Math.min(Math.max(value, min), max);
   }
 
+  function resolveReadingProfile(readingProfile = {}) {
+    return {
+      ...DEFAULT_READING_PROFILE,
+      ...readingProfile,
+    };
+  }
+
   function chooseScrollAction({
     readingProfile = DEFAULT_READING_PROFILE,
     random = Math.random,
   } = {}) {
+    const profile = resolveReadingProfile(readingProfile);
+
     return {
       stepPixels: chooseBoundedInteger({
-        min: readingProfile.minScrollStepPixels,
-        max: readingProfile.maxScrollStepPixels,
+        min: profile.minScrollStepPixels,
+        max: profile.maxScrollStepPixels,
         random,
       }),
       delayMs: chooseBoundedInteger({
-        min: readingProfile.minScrollDelayMs,
-        max: readingProfile.maxScrollDelayMs,
+        min: profile.minScrollDelayMs,
+        max: profile.maxScrollDelayMs,
         random,
       }),
+    };
+  }
+
+  function createTopicStartDelayController({ getTopicKey = () => "" } = {}) {
+    let delayedTopicKey = null;
+
+    return {
+      shouldDelayTopicStart() {
+        return getTopicKey() !== delayedTopicKey;
+      },
+
+      recordTopicStartDelay() {
+        delayedTopicKey = getTopicKey();
+      },
+
+      reset() {
+        delayedTopicKey = null;
+      },
     };
   }
 
@@ -261,6 +289,8 @@ const AutoReadCore = (() => {
     scrollTopic,
     scheduleNextCheck,
     advanceSession,
+    shouldDelayTopicStart = () => false,
+    recordTopicStartDelay = () => {},
     readingProfile,
     random,
     tolerance,
@@ -272,6 +302,14 @@ const AutoReadCore = (() => {
     if (!isTopicReady()) {
       scheduleNextCheck();
       return { status: "waiting" };
+    }
+
+    const profile = resolveReadingProfile(readingProfile);
+
+    if (shouldDelayTopicStart()) {
+      recordTopicStartDelay();
+      scheduleNextCheck(profile.topicStartDelayMs);
+      return { status: "waiting-topic-start", delayMs: profile.topicStartDelayMs };
     }
 
     if (
@@ -406,6 +444,7 @@ const AutoReadCore = (() => {
     continueTopicReading,
     createAutoLikeController,
     createAutoReadingSession,
+    createTopicStartDelayController,
     buildTopicUrl,
     buildReadingQueue,
     chooseScrollAction,
@@ -496,6 +535,10 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   let checkScrollTimeout = null;
   let autoLikeInterval = null;
   let openingTopic = false;
+  const topicStartDelayController =
+    AutoReadCore.createTopicStartDelayController({
+      getTopicKey: () => window.location.pathname,
+    });
 
   function isReadingEnabled() {
     return localStorage.getItem("read") === "true";
@@ -510,6 +553,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       clearTimeout(checkScrollTimeout);
       checkScrollTimeout = null;
     }
+    topicStartDelayController.reset();
     localStorage.removeItem("navigatingToNextTopic");
   }
 
@@ -620,6 +664,8 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     AutoReadCore.continueTopicReading({
       isActive: isReadingEnabled,
       isTopicReady: isTopicContentReady,
+      shouldDelayTopicStart: topicStartDelayController.shouldDelayTopicStart,
+      recordTopicStartDelay: topicStartDelayController.recordTopicStartDelay,
       getViewportMetrics,
       scrollTopic: scrollTopicOnce,
       scheduleNextCheck: (delayMs = topicReadinessDelay) => {
