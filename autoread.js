@@ -25,6 +25,12 @@ const AutoReadCore = (() => {
   const DEFAULT_READING_QUEUE_STORAGE_KEY = "readingQueue";
   const DEFAULT_AUTO_LIKE_STORAGE_KEY = "autoLikeEnabled";
   const DEFAULT_TOPIC_COMPLETION_TOLERANCE = 100;
+  const DEFAULT_READING_PROFILE = {
+    minScrollStepPixels: 8,
+    maxScrollStepPixels: 20,
+    minScrollDelayMs: 250,
+    maxScrollDelayMs: 600,
+  };
   const DEFAULT_SESSION_LABELS = {
     start: "开始阅读",
     stop: "停止阅读",
@@ -223,6 +229,31 @@ const AutoReadCore = (() => {
     return viewportHeight + scrollY >= documentHeight - tolerance;
   }
 
+  function chooseBoundedInteger({ min, max, random }) {
+    const randomValue = Math.min(Math.max(random(), 0), 1);
+    const value = min + Math.floor(randomValue * (max - min + 1));
+
+    return Math.min(Math.max(value, min), max);
+  }
+
+  function chooseScrollAction({
+    readingProfile = DEFAULT_READING_PROFILE,
+    random = Math.random,
+  } = {}) {
+    return {
+      stepPixels: chooseBoundedInteger({
+        min: readingProfile.minScrollStepPixels,
+        max: readingProfile.maxScrollStepPixels,
+        random,
+      }),
+      delayMs: chooseBoundedInteger({
+        min: readingProfile.minScrollDelayMs,
+        max: readingProfile.maxScrollDelayMs,
+        random,
+      }),
+    };
+  }
+
   async function continueTopicReading({
     isActive,
     isTopicReady = () => true,
@@ -230,6 +261,8 @@ const AutoReadCore = (() => {
     scrollTopic,
     scheduleNextCheck,
     advanceSession,
+    readingProfile,
+    random,
     tolerance,
   }) {
     if (!isActive()) {
@@ -251,9 +284,11 @@ const AutoReadCore = (() => {
       return { status: "completed", advanceResult };
     }
 
-    scrollTopic();
-    scheduleNextCheck();
-    return { status: "scrolling" };
+    const scrollAction = chooseScrollAction({ readingProfile, random });
+
+    scrollTopic(scrollAction);
+    scheduleNextCheck(scrollAction.delayMs);
+    return { status: "scrolling", scrollAction };
   }
 
   function createAutoReadingSession({
@@ -364,6 +399,7 @@ const AutoReadCore = (() => {
     DEFAULT_AUTO_LIKE_STORAGE_KEY,
     DEFAULT_COMMENT_LIMIT,
     DEFAULT_MAX_TOPIC_PAGES,
+    DEFAULT_READING_PROFILE,
     DEFAULT_READING_QUEUE_STORAGE_KEY,
     DEFAULT_TOPIC_COMPLETION_TOLERANCE,
     DEFAULT_TOPIC_LIST_LIMIT,
@@ -372,6 +408,7 @@ const AutoReadCore = (() => {
     createAutoReadingSession,
     buildTopicUrl,
     buildReadingQueue,
+    chooseScrollAction,
     createReadingQueueStorage,
     getEligibleTopicsFromSource,
     getReadPosition,
@@ -455,8 +492,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     autoLikeController.setEnabled(false); //默认关闭自动点赞
     console.log("执行了初始数据更新操作");
   }
-  const delay = 2000; // 滚动检查的间隔（毫秒）
-  let scrollInterval = null;
+  const topicReadinessDelay = 2000; // Topic Posts render check interval.
   let checkScrollTimeout = null;
   let autoLikeInterval = null;
   let openingTopic = false;
@@ -470,10 +506,6 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   }
 
   function clearReadTimers() {
-    if (scrollInterval !== null) {
-      clearInterval(scrollInterval);
-      scrollInterval = null;
-    }
     if (checkScrollTimeout !== null) {
       clearTimeout(checkScrollTimeout);
       checkScrollTimeout = null;
@@ -483,13 +515,8 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
 
   let autoReadingSession = null;
 
-  function scrollToBottomSlowly(distancePerStep = 20, delayPerStep = 100) {
-    if (scrollInterval !== null) {
-      clearInterval(scrollInterval);
-    }
-    scrollInterval = setInterval(() => {
-      window.scrollBy(0, distancePerStep);
-    }, delayPerStep); // 每50毫秒滚动20像素
+  function scrollTopicOnce(scrollAction) {
+    window.scrollBy(0, scrollAction.stepPixels);
   }
 
   async function fetchTopicPage(source, page) {
@@ -594,12 +621,12 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       isActive: isReadingEnabled,
       isTopicReady: isTopicContentReady,
       getViewportMetrics,
-      scrollTopic: scrollToBottomSlowly,
-      scheduleNextCheck: () => {
+      scrollTopic: scrollTopicOnce,
+      scheduleNextCheck: (delayMs = topicReadinessDelay) => {
         if (checkScrollTimeout !== null) {
           clearTimeout(checkScrollTimeout);
         }
-        checkScrollTimeout = setTimeout(checkScroll, delay);
+        checkScrollTimeout = setTimeout(checkScroll, delayMs);
       },
       advanceSession: () => {
         console.log("已滚动到底部");
