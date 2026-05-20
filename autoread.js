@@ -33,6 +33,10 @@ const AutoReadCore = (() => {
     topicStartDelayMs: 5000,
     bottomDelayMs: 10000,
     maxConsecutiveTimingFailures: 3,
+    minPostDwellMs: 1200,
+    maxPostDwellMs: 6500,
+    postDwellMsPerCharacter: 20,
+    imagePostDwellBonusMs: 1500,
   };
   const READ_STATE_PAUSE_REASONS = {
     hiddenTab: "hidden-tab",
@@ -292,6 +296,78 @@ const AutoReadCore = (() => {
     };
   }
 
+  function getPostDwellKey(post) {
+    if (!post || post.key === undefined || post.key === null) {
+      return null;
+    }
+
+    return String(post.key);
+  }
+
+  function createVisiblePostDwellController({ getTopicKey = () => "" } = {}) {
+    let currentTopicKey = null;
+    let dwelledPostKeys = new Set();
+
+    function syncTopicKey() {
+      const topicKey = getTopicKey();
+      if (topicKey !== currentTopicKey) {
+        currentTopicKey = topicKey;
+        dwelledPostKeys = new Set();
+      }
+    }
+
+    return {
+      getPostForDwell(visiblePosts = []) {
+        syncTopicKey();
+
+        return visiblePosts.find((post) => {
+          const postKey = getPostDwellKey(post);
+          return postKey !== null && !dwelledPostKeys.has(postKey);
+        });
+      },
+
+      recordPostDwell(post) {
+        syncTopicKey();
+
+        const postKey = getPostDwellKey(post);
+        if (postKey !== null) {
+          dwelledPostKeys.add(postKey);
+        }
+      },
+
+      reset() {
+        currentTopicKey = null;
+        dwelledPostKeys = new Set();
+      },
+    };
+  }
+
+  function choosePostDwellDelay({
+    post,
+    readingProfile = DEFAULT_READING_PROFILE,
+  } = {}) {
+    const profile = resolveReadingProfile(readingProfile);
+    const textLength =
+      post && Number.isFinite(post.textLength) && post.textLength > 0
+        ? post.textLength
+        : 0;
+    const imageCount =
+      post && Number.isFinite(post.imageCount) && post.imageCount > 0
+        ? post.imageCount
+        : 0;
+    const imageBonusMs =
+      imageCount > 0 ? profile.imagePostDwellBonusMs * imageCount : 0;
+    const dwellMs =
+      profile.minPostDwellMs +
+      textLength * profile.postDwellMsPerCharacter +
+      imageBonusMs;
+
+    return Math.min(
+      Math.max(dwellMs, profile.minPostDwellMs),
+      profile.maxPostDwellMs
+    );
+  }
+
   function createReadStateTrustGuard({
     isPageHidden = () => false,
     hasPageFocus = () => true,
@@ -486,6 +562,9 @@ const AutoReadCore = (() => {
     advanceSession,
     shouldDelayTopicStart = () => false,
     recordTopicStartDelay = () => {},
+    getVisiblePosts = () => [],
+    getPostForDwell = () => null,
+    recordPostDwell = () => {},
     readingProfile,
     random,
     tolerance,
@@ -518,6 +597,18 @@ const AutoReadCore = (() => {
         status: "waiting-topic-start",
         delayMs: profile.topicStartDelayMs,
       };
+    }
+
+    const postForDwell = getPostForDwell(getVisiblePosts());
+    if (postForDwell) {
+      recordPostDwell(postForDwell);
+      const delayMs = choosePostDwellDelay({
+        post: postForDwell,
+        readingProfile: profile,
+      });
+
+      scheduleNextCheck(delayMs);
+      return { status: "dwelling-post", post: postForDwell, delayMs };
     }
 
     if (
@@ -723,8 +814,10 @@ const AutoReadCore = (() => {
     createReadStateTrustGuard,
     createTimingRequestMonitor,
     createTopicStartDelayController,
+    createVisiblePostDwellController,
     buildTopicUrl,
     buildReadingQueue,
+    choosePostDwellDelay,
     chooseScrollAction,
     createReadingQueueStorage,
     getEligibleTopicsFromSource,
@@ -826,6 +919,10 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     AutoReadCore.createTopicStartDelayController({
       getTopicKey: () => window.location.pathname,
     });
+  const visiblePostDwellController =
+    AutoReadCore.createVisiblePostDwellController({
+      getTopicKey: () => window.location.pathname,
+    });
   const readStateTrustGuard = AutoReadCore.createReadStateTrustGuard({
     isPageHidden: () => document.hidden === true,
     hasPageFocus: () =>
@@ -847,6 +944,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       checkScrollTimeout = null;
     }
     topicStartDelayController.reset();
+    visiblePostDwellController.reset();
     localStorage.removeItem("navigatingToNextTopic");
   }
 
@@ -978,6 +1076,57 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     );
   }
 
+  function isElementVisibleInViewport(element) {
+    const rect = element.getBoundingClientRect();
+
+    return (
+      rect.width > 0 &&
+      rect.height > 0 &&
+      rect.bottom > 0 &&
+      rect.top < window.innerHeight
+    );
+  }
+
+  function getPostRootElement(element) {
+    return (
+      element.closest("[data-post-id], .topic-post, article") || element
+    );
+  }
+
+  function getPostElementKey(element, fallbackIndex) {
+    const textPreview = (element.textContent || "").trim().slice(0, 80);
+
+    return (
+      element.getAttribute("data-post-id") ||
+      element.getAttribute("data-post-number") ||
+      element.id ||
+      `${window.location.pathname}:visible-post-${fallbackIndex}:${textPreview}`
+    );
+  }
+
+  function getVisiblePostsForDwell() {
+    const roots = [];
+    const seenRoots = new Set();
+
+    document
+      .querySelectorAll(".topic-post, article[data-post-id], .post-stream .topic-body")
+      .forEach((element) => {
+        const root = getPostRootElement(element);
+        if (seenRoots.has(root) || !isElementVisibleInViewport(root)) {
+          return;
+        }
+
+        seenRoots.add(root);
+        roots.push(root);
+      });
+
+    return roots.map((root, index) => ({
+      key: getPostElementKey(root, index),
+      textLength: (root.textContent || "").trim().length,
+      imageCount: root.querySelectorAll("img").length,
+    }));
+  }
+
   // 检查是否已滚动到底部(不断重复执行),到底部时跳转到下一个话题
   function checkScroll() {
     AutoReadCore.continueTopicReading({
@@ -989,6 +1138,9 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       isTopicReady: isTopicContentReady,
       shouldDelayTopicStart: topicStartDelayController.shouldDelayTopicStart,
       recordTopicStartDelay: topicStartDelayController.recordTopicStartDelay,
+      getVisiblePosts: getVisiblePostsForDwell,
+      getPostForDwell: visiblePostDwellController.getPostForDwell,
+      recordPostDwell: visiblePostDwellController.recordPostDwell,
       getViewportMetrics,
       scrollTopic: scrollTopicOnce,
       scheduleNextCheck: (delayMs = topicReadinessDelay) => {
