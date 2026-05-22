@@ -25,18 +25,27 @@ const AutoReadCore = (() => {
   const DEFAULT_READING_QUEUE_STORAGE_KEY = "readingQueue";
   const DEFAULT_AUTO_LIKE_STORAGE_KEY = "autoLikeEnabled";
   const DEFAULT_TOPIC_COMPLETION_TOLERANCE = 100;
+  const DEFAULT_TOPIC_COMPLETION_POST_TOLERANCE = 1;
   const DEFAULT_READING_PROFILE = {
-    minScrollStepPixels: 8,
-    maxScrollStepPixels: 20,
-    minScrollDelayMs: 250,
-    maxScrollDelayMs: 600,
-    topicStartDelayMs: 5000,
+    minScrollStepPixels: 48,
+    maxScrollStepPixels: 96,
+    minScrollDelayMs: 180,
+    maxScrollDelayMs: 420,
+    topicStartDelayMs: 3500,
     bottomDelayMs: 10000,
-    maxConsecutiveTimingFailures: 3,
-    minPostDwellMs: 1200,
-    maxPostDwellMs: 6500,
-    postDwellMsPerCharacter: 20,
-    imagePostDwellBonusMs: 1500,
+    maxConsecutiveTimingFailures: 12,
+    minPostDwellMs: 250,
+    maxPostDwellMs: 1200,
+    postDwellMsPerCharacter: 1,
+    imagePostDwellBonusMs: 250,
+    topicAbandonmentEnabled: true,
+    shortTopicPostThreshold: 20,
+    longTopicPostThreshold: 80,
+    topicAbandonmentProbability: 0.35,
+    longTopicAbandonmentProbability: 0.65,
+    minPostsBeforeAbandon: 8,
+    maxPostsBeforeAbandon: 24,
+    minRemainingPostsBeforeAbandon: 5,
   };
   const READ_STATE_PAUSE_REASONS = {
     hiddenTab: "hidden-tab",
@@ -72,6 +81,22 @@ const AutoReadCore = (() => {
     const readPosition = getReadPosition(topic);
 
     return readPosition === null ? topicUrl : `${topicUrl}/${readPosition}`;
+  }
+
+  function getTopicSessionKeyFromPathname(pathname) {
+    const normalizedPathname = String(pathname || "").replace(/\/+$/, "");
+    const topicPathMatch = normalizedPathname.match(
+      /^(\/t\/[^/]+\/\d+)(?:\/\d+)?$/
+    );
+
+    return topicPathMatch ? topicPathMatch[1] : normalizedPathname || "/";
+  }
+
+  function getTopicIdFromPathname(pathname) {
+    const topicSessionKey = getTopicSessionKeyFromPathname(pathname);
+    const topicIdMatch = topicSessionKey.match(/^\/t\/[^/]+\/(\d+)$/);
+
+    return topicIdMatch ? topicIdMatch[1] : null;
   }
 
   function createReadingQueueStorage({
@@ -171,12 +196,53 @@ const AutoReadCore = (() => {
     return Boolean(topic) && topic.posts_count < commentLimit;
   }
 
+  function getTopicId(topic) {
+    if (!topic || topic.id === undefined || topic.id === null) {
+      return null;
+    }
+
+    return String(topic.id);
+  }
+
+  function createAbandonedTopicTracker({ getCurrentTopicId = () => null } = {}) {
+    const abandonedTopicIds = new Set();
+
+    function normalizeTopicId(topicId) {
+      return topicId === undefined || topicId === null ? null : String(topicId);
+    }
+
+    function isTopicAbandoned(topic) {
+      const topicId = normalizeTopicId(getTopicId(topic));
+      return topicId !== null && abandonedTopicIds.has(topicId);
+    }
+
+    return {
+      recordCurrentTopicAbandoned() {
+        const topicId = normalizeTopicId(getCurrentTopicId());
+        if (topicId !== null) {
+          abandonedTopicIds.add(topicId);
+        }
+      },
+
+      isTopicAbandoned,
+
+      filterTopics(topics = []) {
+        return topics.filter((topic) => !isTopicAbandoned(topic));
+      },
+
+      clear() {
+        abandonedTopicIds.clear();
+      },
+    };
+  }
+
   async function getEligibleTopicsFromSource({
     source,
     fetchTopicPage,
     commentLimit = DEFAULT_COMMENT_LIMIT,
     maxTopicPages = DEFAULT_MAX_TOPIC_PAGES,
     topicListLimit = DEFAULT_TOPIC_LIST_LIMIT,
+    isTopicExcluded = () => false,
   }) {
     let eligibleTopics = [];
 
@@ -189,7 +255,7 @@ const AutoReadCore = (() => {
       }
 
       topics.forEach((topic) => {
-        if (isEligibleTopic(topic, commentLimit)) {
+        if (isEligibleTopic(topic, commentLimit) && !isTopicExcluded(topic)) {
           eligibleTopics.push(topic);
         }
       });
@@ -212,6 +278,7 @@ const AutoReadCore = (() => {
     commentLimit = DEFAULT_COMMENT_LIMIT,
     maxTopicPages = DEFAULT_MAX_TOPIC_PAGES,
     topicListLimit = DEFAULT_TOPIC_LIST_LIMIT,
+    isTopicExcluded = () => false,
   }) {
     for (const source of candidateSources) {
       const topics = await getEligibleTopicsFromSource({
@@ -220,6 +287,7 @@ const AutoReadCore = (() => {
         commentLimit,
         maxTopicPages,
         topicListLimit,
+        isTopicExcluded,
       });
 
       if (topics.length > 0) {
@@ -235,13 +303,64 @@ const AutoReadCore = (() => {
     return selectedQueue.topics;
   }
 
+  function getPositiveInteger(value) {
+    const number = Number(value);
+    return Number.isInteger(number) && number > 0 ? number : null;
+  }
+
+  function getHighestPositiveInteger(values) {
+    const positiveIntegers = values
+      .map(getPositiveInteger)
+      .filter((value) => value !== null);
+
+    return positiveIntegers.length > 0
+      ? Math.max(...positiveIntegers)
+      : null;
+  }
+
+  function getTopicFinalPostNumber(topicProgress = {}) {
+    return getHighestPositiveInteger([
+      topicProgress.finalPostNumber,
+      topicProgress.highestPostNumber,
+      topicProgress.postsCount,
+    ]);
+  }
+
+  function getTopicCurrentPostNumber(topicProgress = {}) {
+    const visiblePostNumbers = Array.isArray(topicProgress.visiblePostNumbers)
+      ? topicProgress.visiblePostNumbers
+      : [];
+
+    return getHighestPositiveInteger([
+      topicProgress.currentPostNumber,
+      topicProgress.maxVisiblePostNumber,
+      ...visiblePostNumbers,
+    ]);
+  }
+
   function isTopicCompletionReached({
     viewportHeight,
     scrollY,
     documentHeight,
     tolerance = DEFAULT_TOPIC_COMPLETION_TOLERANCE,
+    topicCompletionPostTolerance = DEFAULT_TOPIC_COMPLETION_POST_TOLERANCE,
+    ...topicProgress
   }) {
-    return viewportHeight + scrollY >= documentHeight - tolerance;
+    const reachedRenderedBottom =
+      viewportHeight + scrollY >= documentHeight - tolerance;
+
+    if (!reachedRenderedBottom) {
+      return false;
+    }
+
+    const finalPostNumber = getTopicFinalPostNumber(topicProgress);
+    const currentPostNumber = getTopicCurrentPostNumber(topicProgress);
+
+    if (finalPostNumber !== null && currentPostNumber !== null) {
+      return currentPostNumber >= finalPostNumber - topicCompletionPostTolerance;
+    }
+
+    return true;
   }
 
   function chooseBoundedInteger({ min, max, random }) {
@@ -304,15 +423,37 @@ const AutoReadCore = (() => {
     return String(post.key);
   }
 
+  function getUniquePostDwellEntries(visiblePosts) {
+    const seenKeys = new Set();
+    const entries = [];
+
+    visiblePosts.forEach((post) => {
+      const postKey = getPostDwellKey(post);
+      if (postKey === null || seenKeys.has(postKey)) {
+        return;
+      }
+
+      seenKeys.add(postKey);
+      entries.push({
+        key: postKey,
+        post,
+      });
+    });
+
+    return entries;
+  }
+
   function createVisiblePostDwellController({ getTopicKey = () => "" } = {}) {
     let currentTopicKey = null;
     let dwelledPostKeys = new Set();
+    let hasInitialVisiblePostBaseline = false;
 
     function syncTopicKey() {
       const topicKey = getTopicKey();
       if (topicKey !== currentTopicKey) {
         currentTopicKey = topicKey;
         dwelledPostKeys = new Set();
+        hasInitialVisiblePostBaseline = false;
       }
     }
 
@@ -320,10 +461,22 @@ const AutoReadCore = (() => {
       getPostForDwell(visiblePosts = []) {
         syncTopicKey();
 
-        return visiblePosts.find((post) => {
-          const postKey = getPostDwellKey(post);
-          return postKey !== null && !dwelledPostKeys.has(postKey);
-        });
+        const dwellEntries = getUniquePostDwellEntries(visiblePosts);
+
+        if (!hasInitialVisiblePostBaseline) {
+          dwellEntries.forEach((entry) => {
+            dwelledPostKeys.add(entry.key);
+          });
+          hasInitialVisiblePostBaseline = dwellEntries.length > 0;
+
+          return null;
+        }
+
+        const dwellEntry = dwellEntries.find(
+          (entry) => !dwelledPostKeys.has(entry.key)
+        );
+
+        return dwellEntry ? dwellEntry.post : null;
       },
 
       recordPostDwell(post) {
@@ -338,6 +491,143 @@ const AutoReadCore = (() => {
       reset() {
         currentTopicKey = null;
         dwelledPostKeys = new Set();
+        hasInitialVisiblePostBaseline = false;
+      },
+    };
+  }
+
+  function clampProbability(value) {
+    const probability = Number(value);
+    if (!Number.isFinite(probability)) {
+      return 0;
+    }
+
+    return Math.min(Math.max(probability, 0), 1);
+  }
+
+  function createTopicAbandonmentController({
+    getTopicKey = () => "",
+    random = Math.random,
+  } = {}) {
+    let currentTopicKey = null;
+    let startPostNumber = null;
+    let maxObservedPostNumber = null;
+    let abandonmentPlan = null;
+    let abandonedTopicKeys = new Set();
+
+    function resetCurrentTopicState() {
+      startPostNumber = null;
+      maxObservedPostNumber = null;
+      abandonmentPlan = null;
+    }
+
+    function syncTopicKey() {
+      const topicKey = getTopicKey();
+      if (topicKey !== currentTopicKey) {
+        currentTopicKey = topicKey;
+        resetCurrentTopicState();
+      }
+    }
+
+    function buildAbandonmentPlan({ profile, finalPostNumber }) {
+      if (
+        !profile.topicAbandonmentEnabled ||
+        startPostNumber === null ||
+        finalPostNumber === null
+      ) {
+        return { willAbandon: false };
+      }
+
+      const unreadSpan = finalPostNumber - startPostNumber + 1;
+      if (unreadSpan <= profile.shortTopicPostThreshold) {
+        return { willAbandon: false };
+      }
+
+      const probability =
+        unreadSpan >= profile.longTopicPostThreshold
+          ? profile.longTopicAbandonmentProbability
+          : profile.topicAbandonmentProbability;
+      const willAbandon = random() < clampProbability(probability);
+      const maxReadablePosts = Math.max(
+        0,
+        unreadSpan - profile.minRemainingPostsBeforeAbandon
+      );
+      const maxPostsBeforeAbandon = Math.min(
+        profile.maxPostsBeforeAbandon,
+        maxReadablePosts
+      );
+
+      if (
+        !willAbandon ||
+        maxPostsBeforeAbandon < profile.minPostsBeforeAbandon
+      ) {
+        return { willAbandon: false };
+      }
+
+      return {
+        willAbandon: true,
+        targetReadPostCount: chooseBoundedInteger({
+          min: profile.minPostsBeforeAbandon,
+          max: maxPostsBeforeAbandon,
+          random,
+        }),
+      };
+    }
+
+    return {
+      shouldAbandonTopic(topicProgress = {}, readingProfile) {
+        syncTopicKey();
+
+        if (abandonedTopicKeys.has(currentTopicKey)) {
+          return false;
+        }
+
+        const profile = resolveReadingProfile(readingProfile);
+        const currentPostNumber = getTopicCurrentPostNumber(topicProgress);
+        const finalPostNumber = getTopicFinalPostNumber(topicProgress);
+
+        if (currentPostNumber === null || finalPostNumber === null) {
+          return false;
+        }
+
+        if (startPostNumber === null) {
+          startPostNumber = currentPostNumber;
+        }
+
+        maxObservedPostNumber =
+          maxObservedPostNumber === null
+            ? currentPostNumber
+            : Math.max(maxObservedPostNumber, currentPostNumber);
+
+        if (abandonmentPlan === null) {
+          abandonmentPlan = buildAbandonmentPlan({
+            profile,
+            finalPostNumber,
+          });
+        }
+
+        if (!abandonmentPlan.willAbandon) {
+          return false;
+        }
+
+        const readPostCount = maxObservedPostNumber - startPostNumber + 1;
+        const remainingPostCount = finalPostNumber - maxObservedPostNumber;
+
+        return (
+          readPostCount >= abandonmentPlan.targetReadPostCount &&
+          remainingPostCount >= profile.minRemainingPostsBeforeAbandon
+        );
+      },
+
+      recordTopicAbandonment() {
+        syncTopicKey();
+        abandonedTopicKeys.add(currentTopicKey);
+      },
+
+      reset() {
+        currentTopicKey = null;
+        abandonedTopicKeys = new Set();
+        resetCurrentTopicState();
       },
     };
   }
@@ -565,6 +855,9 @@ const AutoReadCore = (() => {
     getVisiblePosts = () => [],
     getPostForDwell = () => null,
     recordPostDwell = () => {},
+    getTopicProgress = () => ({}),
+    shouldAbandonTopic = () => false,
+    recordTopicAbandonment = () => {},
     readingProfile,
     random,
     tolerance,
@@ -611,14 +904,32 @@ const AutoReadCore = (() => {
       return { status: "dwelling-post", post: postForDwell, delayMs };
     }
 
+    const topicProgress = getTopicProgress();
+    const viewportMetrics = getViewportMetrics();
+
     if (
       isTopicCompletionReached({
-        ...getViewportMetrics(),
+        ...viewportMetrics,
+        ...topicProgress,
         tolerance,
       })
     ) {
       scheduleTopicCompletion(profile.bottomDelayMs, advanceSession);
       return { status: "waiting-bottom", delayMs: profile.bottomDelayMs };
+    }
+
+    if (shouldAbandonTopic(topicProgress, profile)) {
+      recordTopicAbandonment(topicProgress);
+      const advanceResult = await advanceSession({
+        reason: "abandoned-topic",
+        topicProgress,
+      });
+
+      return {
+        status: "abandoned-topic",
+        advanceResult,
+        topicProgress,
+      };
     }
 
     const scrollAction = chooseScrollAction({ readingProfile, random });
@@ -809,10 +1120,12 @@ const AutoReadCore = (() => {
     DEFAULT_TOPIC_LIST_LIMIT,
     READ_STATE_PAUSE_REASONS,
     continueTopicReading,
+    createAbandonedTopicTracker,
     createAutoLikeController,
     createAutoReadingSession,
     createReadStateTrustGuard,
     createTimingRequestMonitor,
+    createTopicAbandonmentController,
     createTopicStartDelayController,
     createVisiblePostDwellController,
     buildTopicUrl,
@@ -820,6 +1133,8 @@ const AutoReadCore = (() => {
     choosePostDwellDelay,
     chooseScrollAction,
     createReadingQueueStorage,
+    getTopicIdFromPathname,
+    getTopicSessionKeyFromPathname,
     getEligibleTopicsFromSource,
     getReadPosition,
     getTopicsFromTopicListPayload,
@@ -855,6 +1170,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   const sessionReadingQueueStorage = {
     clear() {
       readingQueueStorage.clear();
+      abandonedTopicTracker.clear();
       localStorage.removeItem("topicList");
     },
     get() {
@@ -915,13 +1231,21 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   let checkScrollTimeout = null;
   let autoLikeInterval = null;
   let openingTopic = false;
+  const abandonedTopicTracker = AutoReadCore.createAbandonedTopicTracker({
+    getCurrentTopicId: () =>
+      AutoReadCore.getTopicIdFromPathname(window.location.pathname),
+  });
   const topicStartDelayController =
     AutoReadCore.createTopicStartDelayController({
-      getTopicKey: () => window.location.pathname,
+      getTopicKey: getCurrentTopicSessionKey,
     });
   const visiblePostDwellController =
     AutoReadCore.createVisiblePostDwellController({
-      getTopicKey: () => window.location.pathname,
+      getTopicKey: getCurrentTopicSessionKey,
+    });
+  const topicAbandonmentController =
+    AutoReadCore.createTopicAbandonmentController({
+      getTopicKey: getCurrentTopicSessionKey,
     });
   const readStateTrustGuard = AutoReadCore.createReadStateTrustGuard({
     isPageHidden: () => document.hidden === true,
@@ -938,6 +1262,10 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     return /^\/t\/[^/]+\/\d+(?:\/\d+)?\/?$/.test(window.location.pathname);
   }
 
+  function getCurrentTopicSessionKey() {
+    return AutoReadCore.getTopicSessionKeyFromPathname(window.location.pathname);
+  }
+
   function clearReadTimers() {
     if (checkScrollTimeout !== null) {
       clearTimeout(checkScrollTimeout);
@@ -945,6 +1273,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     }
     topicStartDelayController.reset();
     visiblePostDwellController.reset();
+    topicAbandonmentController.reset();
     localStorage.removeItem("navigatingToNextTopic");
   }
 
@@ -1026,6 +1355,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       commentLimit,
       maxTopicPages,
       topicListLimit,
+      isTopicExcluded: abandonedTopicTracker.isTopicAbandoned,
     });
 
     if (selectedQueue.topics.length > 0) {
@@ -1076,31 +1406,64 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     );
   }
 
-  function isElementVisibleInViewport(element) {
+  function isElementMeaningfullyVisibleForDwell(element) {
     const rect = element.getBoundingClientRect();
+    if (
+      rect.width <= 0 ||
+      rect.height <= 0 ||
+      rect.bottom <= 0 ||
+      rect.top >= window.innerHeight
+    ) {
+      return false;
+    }
+
+    const visibleHeight =
+      Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0);
+    const requiredVisibleHeight = Math.min(160, rect.height * 0.35);
 
     return (
-      rect.width > 0 &&
-      rect.height > 0 &&
-      rect.bottom > 0 &&
-      rect.top < window.innerHeight
+      visibleHeight >= requiredVisibleHeight ||
+      (rect.top >= 0 && rect.top <= window.innerHeight * 0.65)
     );
   }
 
   function getPostRootElement(element) {
     return (
-      element.closest("[data-post-id], .topic-post, article") || element
+      element.closest(".topic-post[data-post-number]") ||
+      element.closest(".topic-post") ||
+      element.closest("article[data-post-id]") ||
+      element.closest("[data-post-id]") ||
+      element.closest("article") ||
+      element
     );
+  }
+
+  function getMatchingElementAttribute(element, selector, attributeName) {
+    const matchingElement = element.matches(selector)
+      ? element
+      : element.querySelector(selector);
+
+    return matchingElement ? matchingElement.getAttribute(attributeName) : null;
   }
 
   function getPostElementKey(element, fallbackIndex) {
     const textPreview = (element.textContent || "").trim().slice(0, 80);
+    const postNumber = getMatchingElementAttribute(
+      element,
+      ".topic-post[data-post-number], [data-post-number]",
+      "data-post-number"
+    );
+    const postId = getMatchingElementAttribute(
+      element,
+      "[data-post-id]",
+      "data-post-id"
+    );
 
     return (
-      element.getAttribute("data-post-id") ||
-      element.getAttribute("data-post-number") ||
+      (postNumber ? `post-number:${postNumber}` : null) ||
+      (postId ? `post-id:${postId}` : null) ||
       element.id ||
-      `${window.location.pathname}:visible-post-${fallbackIndex}:${textPreview}`
+      `${getCurrentTopicSessionKey()}:visible-post-${fallbackIndex}:${textPreview}`
     );
   }
 
@@ -1112,7 +1475,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       .querySelectorAll(".topic-post, article[data-post-id], .post-stream .topic-body")
       .forEach((element) => {
         const root = getPostRootElement(element);
-        if (seenRoots.has(root) || !isElementVisibleInViewport(root)) {
+        if (seenRoots.has(root) || !isElementMeaningfullyVisibleForDwell(root)) {
           return;
         }
 
@@ -1125,6 +1488,74 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       textLength: (root.textContent || "").trim().length,
       imageCount: root.querySelectorAll("img").length,
     }));
+  }
+
+  function getVisiblePostNumbers() {
+    const postNumbers = [];
+    const seenRoots = new Set();
+
+    document
+      .querySelectorAll(".topic-post, article[data-post-id], .post-stream .topic-body")
+      .forEach((element) => {
+        const root = getPostRootElement(element);
+        if (seenRoots.has(root) || !isElementMeaningfullyVisibleForDwell(root)) {
+          return;
+        }
+
+        const postNumber = getMatchingElementAttribute(
+          root,
+          ".topic-post[data-post-number], [data-post-number]",
+          "data-post-number"
+        );
+        const numericPostNumber = Number(postNumber);
+        if (Number.isInteger(numericPostNumber) && numericPostNumber > 0) {
+          postNumbers.push(numericPostNumber);
+        }
+        seenRoots.add(root);
+      });
+
+    return postNumbers;
+  }
+
+  function getPostNumberFromPathname() {
+    const postNumberMatch = window.location.pathname.match(
+      /^\/t\/[^/]+\/\d+\/(\d+)\/?$/
+    );
+    const postNumber = postNumberMatch ? Number(postNumberMatch[1]) : null;
+
+    return Number.isInteger(postNumber) && postNumber > 0 ? postNumber : null;
+  }
+
+  function getTimelineTopicProgress() {
+    const timelineReplies = document.querySelector(".timeline-replies");
+    const timelineText = timelineReplies
+      ? (timelineReplies.textContent || "").replace(/\s+/g, " ").trim()
+      : "";
+    const progressMatch = timelineText.match(/(\d+)\s*\/\s*(\d+)/);
+
+    if (!progressMatch) {
+      return {};
+    }
+
+    return {
+      currentPostNumber: Number(progressMatch[1]),
+      highestPostNumber: Number(progressMatch[2]),
+    };
+  }
+
+  function getTopicProgressMetrics() {
+    const timelineProgress = getTimelineTopicProgress();
+    const visiblePostNumbers = getVisiblePostNumbers();
+    const maxVisiblePostNumber =
+      visiblePostNumbers.length > 0 ? Math.max(...visiblePostNumbers) : null;
+
+    return {
+      ...timelineProgress,
+      currentPostNumber:
+        timelineProgress.currentPostNumber || getPostNumberFromPathname(),
+      maxVisiblePostNumber,
+      visiblePostNumbers,
+    };
   }
 
   // 检查是否已滚动到底部(不断重复执行),到底部时跳转到下一个话题
@@ -1141,6 +1572,12 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       getVisiblePosts: getVisiblePostsForDwell,
       getPostForDwell: visiblePostDwellController.getPostForDwell,
       recordPostDwell: visiblePostDwellController.recordPostDwell,
+      getTopicProgress: getTopicProgressMetrics,
+      shouldAbandonTopic: topicAbandonmentController.shouldAbandonTopic,
+      recordTopicAbandonment: () => {
+        topicAbandonmentController.recordTopicAbandonment();
+        abandonedTopicTracker.recordCurrentTopicAbandoned();
+      },
       getViewportMetrics,
       scrollTopic: scrollTopicOnce,
       scheduleNextCheck: (delayMs = topicReadinessDelay) => {
@@ -1160,8 +1597,8 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
           });
         }, delayMs);
       },
-      advanceSession: () => {
-        console.log("已滚动到底部");
+      advanceSession: ({ reason } = {}) => {
+        console.log(reason === "abandoned-topic" ? "中途跳过主题" : "已滚动到底部");
         return openNewTopic();
       },
     });

@@ -225,6 +225,24 @@ test("Scroll actions stay inside configured bounds at the random upper edge", ()
   });
 });
 
+test("Default scroll profile keeps continuous reading in a practical pace range", () => {
+  const slowestPixelsPerSecond =
+    (DEFAULT_READING_PROFILE.minScrollStepPixels /
+      DEFAULT_READING_PROFILE.maxScrollDelayMs) *
+    1000;
+  const fastestPixelsPerSecond =
+    (DEFAULT_READING_PROFILE.maxScrollStepPixels /
+      DEFAULT_READING_PROFILE.minScrollDelayMs) *
+    1000;
+
+  assert.equal(DEFAULT_READING_PROFILE.minScrollStepPixels, 48);
+  assert.equal(DEFAULT_READING_PROFILE.maxScrollStepPixels, 96);
+  assert.equal(DEFAULT_READING_PROFILE.minScrollDelayMs, 180);
+  assert.equal(DEFAULT_READING_PROFILE.maxScrollDelayMs, 420);
+  assert.ok(slowestPixelsPerSecond >= 100);
+  assert.ok(fastestPixelsPerSecond <= 550);
+});
+
 test("Consecutive Topic checks can choose non-identical scroll actions", async () => {
   const randomValues = [0, 0, 0.999, 0.999];
   const scrollActions = [];

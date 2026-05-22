@@ -4,6 +4,7 @@ const test = require("node:test");
 const {
   DEFAULT_READING_PROFILE,
   READ_STATE_PAUSE_REASONS,
+  choosePostDwellDelay,
   continueTopicReading,
   createAutoReadingSession,
   createReadStateTrustGuard,
@@ -28,9 +29,10 @@ function createMemoryStorage() {
   };
 }
 
-test("Newly visible Posts pause Topic scrolling for post-level dwell", async () => {
+test("Initial visible Posts are baselined before the first paced scroll", async () => {
   const dwellController = createVisiblePostDwellController();
   const scheduledDelays = [];
+  const scrollActions = [];
   const visiblePosts = [
     {
       key: "post-101",
@@ -44,11 +46,14 @@ test("Newly visible Posts pause Topic scrolling for post-level dwell", async () 
     getVisiblePosts: () => visiblePosts,
     getPostForDwell: dwellController.getPostForDwell,
     recordPostDwell: dwellController.recordPostDwell,
-    getViewportMetrics: () => {
-      throw new Error("Post dwell should happen before viewport checks");
-    },
-    scrollTopic: () => {
-      throw new Error("Post dwell should pause before scrolling");
+    getViewportMetrics: () => ({
+      viewportHeight: 800,
+      scrollY: 100,
+      documentHeight: 2000,
+    }),
+    random: () => 0,
+    scrollTopic: (scrollAction) => {
+      scrollActions.push(scrollAction);
     },
     scheduleNextCheck: (delayMs) => {
       scheduledDelays.push(delayMs);
@@ -62,23 +67,99 @@ test("Newly visible Posts pause Topic scrolling for post-level dwell", async () 
     },
   });
 
-  assert.equal(result.status, "dwelling-post");
-  assert.equal(result.post, visiblePosts[0]);
-  assert.equal(result.delayMs, 3000);
-  assert.deepEqual(scheduledDelays, [3000]);
+  assert.equal(result.status, "scrolling");
+  assert.deepEqual(scrollActions, [
+    {
+      stepPixels: DEFAULT_READING_PROFILE.minScrollStepPixels,
+      delayMs: DEFAULT_READING_PROFILE.minScrollDelayMs,
+    },
+  ]);
+  assert.deepEqual(scheduledDelays, [
+    DEFAULT_READING_PROFILE.minScrollDelayMs,
+  ]);
 });
 
-test("Already-dwelled visible Posts do not block the next paced scroll", async () => {
+test("Newly visible Posts pause Topic scrolling for post-level dwell", async () => {
   const dwellController = createVisiblePostDwellController();
   const scheduledDelays = [];
   const scrollActions = [];
-  const visiblePosts = [
+  const initialVisiblePosts = [
     {
       key: "post-101",
       textLength: 120,
       imageCount: 0,
     },
   ];
+  const newlyVisiblePost = {
+    key: "post-102",
+    textLength: 120,
+    imageCount: 0,
+  };
+  let visiblePosts = initialVisiblePosts;
+
+  const options = {
+    isActive: () => true,
+    getVisiblePosts: () => visiblePosts,
+    getPostForDwell: dwellController.getPostForDwell,
+    recordPostDwell: dwellController.recordPostDwell,
+    getViewportMetrics: () => ({
+      viewportHeight: 800,
+      scrollY: 100,
+      documentHeight: 2000,
+    }),
+    random: () => 0,
+    scrollTopic: (scrollAction) => {
+      scrollActions.push(scrollAction);
+    },
+    scheduleNextCheck: (delayMs) => {
+      scheduledDelays.push(delayMs);
+    },
+    advanceSession: () => {
+      throw new Error("Topic before completion should not advance");
+    },
+    readingProfile: {
+      minPostDwellMs: 1200,
+      maxPostDwellMs: 3000,
+    },
+  };
+
+  const initialScrollResult = await continueTopicReading(options);
+  visiblePosts = [...initialVisiblePosts, newlyVisiblePost];
+  const dwellResult = await continueTopicReading(options);
+
+  assert.equal(initialScrollResult.status, "scrolling");
+  assert.equal(dwellResult.status, "dwelling-post");
+  assert.equal(dwellResult.post, newlyVisiblePost);
+  assert.equal(dwellResult.delayMs, 1320);
+  assert.deepEqual(scrollActions, [
+    {
+      stepPixels: DEFAULT_READING_PROFILE.minScrollStepPixels,
+      delayMs: DEFAULT_READING_PROFILE.minScrollDelayMs,
+    },
+  ]);
+  assert.deepEqual(scheduledDelays, [
+    DEFAULT_READING_PROFILE.minScrollDelayMs,
+    dwellResult.delayMs,
+  ]);
+});
+
+test("Already-dwelled visible Posts do not block the next paced scroll", async () => {
+  const dwellController = createVisiblePostDwellController();
+  const scheduledDelays = [];
+  const scrollActions = [];
+  const initialVisiblePosts = [
+    {
+      key: "post-101",
+      textLength: 120,
+      imageCount: 0,
+    },
+  ];
+  const newlyVisiblePost = {
+    key: "post-102",
+    textLength: 120,
+    imageCount: 0,
+  };
+  let visiblePosts = initialVisiblePosts;
 
   const options = {
     isActive: () => true,
@@ -102,18 +183,89 @@ test("Already-dwelled visible Posts do not block the next paced scroll", async (
     },
   };
 
+  const initialScrollResult = await continueTopicReading(options);
+  visiblePosts = [...initialVisiblePosts, newlyVisiblePost];
   const dwellResult = await continueTopicReading(options);
   const scrollResult = await continueTopicReading(options);
 
+  assert.equal(initialScrollResult.status, "scrolling");
   assert.equal(dwellResult.status, "dwelling-post");
+  assert.equal(dwellResult.post, newlyVisiblePost);
   assert.equal(scrollResult.status, "scrolling");
   assert.deepEqual(scrollActions, [
     {
       stepPixels: DEFAULT_READING_PROFILE.minScrollStepPixels,
       delayMs: DEFAULT_READING_PROFILE.minScrollDelayMs,
     },
+    {
+      stepPixels: DEFAULT_READING_PROFILE.minScrollStepPixels,
+      delayMs: DEFAULT_READING_PROFILE.minScrollDelayMs,
+    },
   ]);
   assert.deepEqual(scheduledDelays, [
+    DEFAULT_READING_PROFILE.minScrollDelayMs,
+    dwellResult.delayMs,
+    DEFAULT_READING_PROFILE.minScrollDelayMs,
+  ]);
+});
+
+test("Duplicate visible Post representations only dwell once", async () => {
+  const dwellController = createVisiblePostDwellController();
+  const scheduledDelays = [];
+  const scrollActions = [];
+  const initialVisiblePosts = [
+    {
+      key: "post-101",
+      textLength: 120,
+      imageCount: 0,
+    },
+    {
+      key: "post-101",
+      textLength: 120,
+      imageCount: 0,
+    },
+  ];
+  const newlyVisiblePost = {
+    key: "post-102",
+    textLength: 120,
+    imageCount: 0,
+  };
+  let visiblePosts = initialVisiblePosts;
+
+  const options = {
+    isActive: () => true,
+    getVisiblePosts: () => visiblePosts,
+    getPostForDwell: dwellController.getPostForDwell,
+    recordPostDwell: dwellController.recordPostDwell,
+    getViewportMetrics: () => ({
+      viewportHeight: 800,
+      scrollY: 100,
+      documentHeight: 2000,
+    }),
+    random: () => 0,
+    scrollTopic: (scrollAction) => {
+      scrollActions.push(scrollAction);
+    },
+    scheduleNextCheck: (delayMs) => {
+      scheduledDelays.push(delayMs);
+    },
+    advanceSession: () => {
+      throw new Error("Topic before completion should not advance");
+    },
+  };
+
+  const initialScrollResult = await continueTopicReading(options);
+  visiblePosts = [...initialVisiblePosts, newlyVisiblePost, newlyVisiblePost];
+  const dwellResult = await continueTopicReading(options);
+  const scrollResult = await continueTopicReading(options);
+
+  assert.equal(initialScrollResult.status, "scrolling");
+  assert.equal(dwellResult.status, "dwelling-post");
+  assert.equal(dwellResult.post, newlyVisiblePost);
+  assert.equal(scrollResult.status, "scrolling");
+  assert.equal(scrollActions.length, 2);
+  assert.deepEqual(scheduledDelays, [
+    DEFAULT_READING_PROFILE.minScrollDelayMs,
     dwellResult.delayMs,
     DEFAULT_READING_PROFILE.minScrollDelayMs,
   ]);
@@ -122,10 +274,24 @@ test("Already-dwelled visible Posts do not block the next paced scroll", async (
 test("Longer Posts and image Posts dwell longer within configured bounds", async () => {
   async function getDwellDelay(post) {
     const dwellController = createVisiblePostDwellController();
+    dwellController.getPostForDwell([
+      {
+        key: "initial-post",
+        textLength: 120,
+        imageCount: 0,
+      },
+    ]);
 
     const result = await continueTopicReading({
       isActive: () => true,
-      getVisiblePosts: () => [post],
+      getVisiblePosts: () => [
+        {
+          key: "initial-post",
+          textLength: 120,
+          imageCount: 0,
+        },
+        post,
+      ],
       getPostForDwell: dwellController.getPostForDwell,
       recordPostDwell: dwellController.recordPostDwell,
       getViewportMetrics: () => {
@@ -176,10 +342,30 @@ test("Longer Posts and image Posts dwell longer within configured bounds", async
   });
 });
 
+test("Default post dwell stays brief enough for continuous reading", () => {
+  const delayMs = choosePostDwellDelay({
+    post: {
+      key: "long-image-post",
+      textLength: 1200,
+      imageCount: 3,
+    },
+  });
+
+  assert.equal(delayMs, DEFAULT_READING_PROFILE.maxPostDwellMs);
+  assert.ok(delayMs <= 2000);
+});
+
 test("Stop Reading during post-level dwell cancels the pending dwell check", async () => {
   let active = true;
   let pendingDwell = false;
   const dwellController = createVisiblePostDwellController();
+  dwellController.getPostForDwell([
+    {
+      key: "post-100",
+      textLength: 120,
+      imageCount: 0,
+    },
+  ]);
   const session = createAutoReadingSession({
     baseUrl: "https://linux.do",
     getActiveState: () => active,
@@ -202,6 +388,11 @@ test("Stop Reading during post-level dwell cancels the pending dwell check", asy
   const dwellResult = await continueTopicReading({
     isActive: session.isActive,
     getVisiblePosts: () => [
+      {
+        key: "post-100",
+        textLength: 120,
+        imageCount: 0,
+      },
       {
         key: "post-101",
         textLength: 120,
@@ -235,8 +426,23 @@ test("Stop Reading during post-level dwell cancels the pending dwell check", asy
         textLength: 120,
         imageCount: 0,
       },
+    ]),
+    null
+  );
+  assert.equal(
+    dwellController.getPostForDwell([
+      {
+        key: "post-101",
+        textLength: 120,
+        imageCount: 0,
+      },
+      {
+        key: "post-102",
+        textLength: 120,
+        imageCount: 0,
+      },
     ]).key,
-    "post-101"
+    "post-102"
   );
 });
 

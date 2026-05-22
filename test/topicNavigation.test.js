@@ -4,6 +4,7 @@ const test = require("node:test");
 const {
   buildTopicUrl,
   createReadingQueueStorage,
+  getTopicSessionKeyFromPathname,
   openNextQueuedTopic,
 } = require("../autoread");
 
@@ -57,6 +58,22 @@ test("Queued Eligible Topic without a usable Read Position opens from the beginn
       "https://linux.do/t/topic/104",
     ]
   );
+});
+
+test("Topic session key ignores Discourse post-number URL updates", () => {
+  assert.equal(
+    getTopicSessionKeyFromPathname("/t/topic/2216112/49"),
+    "/t/topic/2216112"
+  );
+  assert.equal(
+    getTopicSessionKeyFromPathname("/t/topic/2216112/55/"),
+    "/t/topic/2216112"
+  );
+  assert.equal(
+    getTopicSessionKeyFromPathname("/t/custom-slug/2216112/55"),
+    "/t/custom-slug/2216112"
+  );
+  assert.equal(getTopicSessionKeyFromPathname("/latest"), "/latest");
 });
 
 test("Reading Queue snapshot survives navigation during a running Auto-Reading Session", () => {

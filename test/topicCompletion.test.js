@@ -255,6 +255,64 @@ test("Topic Completion uses a near-bottom tolerance without advancing too early"
   );
 });
 
+test("Topic Completion waits for the real final Post when Topic metadata is available", () => {
+  assert.equal(
+    isTopicCompletionReached({
+      viewportHeight: 800,
+      scrollY: 1100,
+      documentHeight: 2000,
+      currentPostNumber: 12,
+      highestPostNumber: 100,
+    }),
+    false
+  );
+  assert.equal(
+    isTopicCompletionReached({
+      viewportHeight: 800,
+      scrollY: 1100,
+      documentHeight: 2000,
+      currentPostNumber: 99,
+      highestPostNumber: 100,
+    }),
+    true
+  );
+});
+
+test("Lazy-rendered bottom does not advance before the final Topic Post", async () => {
+  let scrollCalls = 0;
+  let scheduledCompletions = 0;
+
+  const result = await continueTopicReading({
+    isActive: () => true,
+    getTopicProgress: () => ({
+      currentPostNumber: 12,
+      highestPostNumber: 100,
+    }),
+    getViewportMetrics: () => ({
+      viewportHeight: 800,
+      scrollY: 1100,
+      documentHeight: 2000,
+    }),
+    scrollTopic: () => {
+      scrollCalls += 1;
+    },
+    scheduleNextCheck: () => {},
+    scheduleTopicCompletion: () => {
+      scheduledCompletions += 1;
+    },
+    advanceSession: () => {
+      throw new Error("Lazy-rendered Topics should not advance early");
+    },
+    readingProfile: {
+      topicAbandonmentEnabled: false,
+    },
+  });
+
+  assert.equal(result.status, "scrolling");
+  assert.equal(scrollCalls, 1);
+  assert.equal(scheduledCompletions, 0);
+});
+
 test("Inactive Auto-Reading Sessions do not scroll, schedule, or advance", async () => {
   let getViewportCalls = 0;
   let scrollCalls = 0;
