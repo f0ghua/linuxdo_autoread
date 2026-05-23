@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Read
 // @namespace    http://tampermonkey.net/
-// @version      1.4.7
+// @version      1.4.8
 // @description  自动刷linuxdo文章
 // @author       liuweiqing
 // @match        https://meta.discourse.org/*
@@ -396,6 +396,10 @@ const AutoReadCore = (() => {
       const currentPostNumber = getTopicCurrentPostNumber(topicProgress);
 
       if (currentPostNumber !== null) {
+        if (currentPostNumber >= finalPostNumber) {
+          return true;
+        }
+
         return (
           reachedRenderedBottom &&
           currentPostNumber >= finalPostNumber - topicCompletionPostTolerance

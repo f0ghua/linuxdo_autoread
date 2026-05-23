@@ -354,6 +354,46 @@ test("Final visible Topic Post completes without scrolling to the rendered page 
   assert.equal(scheduledCompletion.delayMs, 7000);
 });
 
+test("Timeline final Topic Post completes without scrolling to the rendered page bottom", async () => {
+  let scrollCalls = 0;
+  let scheduledCompletion = null;
+
+  const result = await continueTopicReading({
+    isActive: () => true,
+    getTopicProgress: () => ({
+      currentPostNumber: 100,
+      highestPostNumber: 100,
+      maxVisiblePostNumber: null,
+      visiblePostNumbers: [],
+    }),
+    getViewportMetrics: () => ({
+      viewportHeight: 800,
+      scrollY: 1200,
+      documentHeight: 4000,
+    }),
+    scrollTopic: () => {
+      scrollCalls += 1;
+    },
+    scheduleNextCheck: () => {
+      throw new Error("Completed Topics should not schedule another scroll check");
+    },
+    scheduleTopicCompletion: (delayMs, advance) => {
+      scheduledCompletion = { delayMs, advance };
+    },
+    advanceSession: () => ({ status: "opened" }),
+    readingProfile: {
+      minTopicCompletionDelayMs: 6000,
+      maxTopicCompletionDelayMs: 6000,
+      topicAbandonmentEnabled: false,
+    },
+  });
+
+  assert.equal(result.status, "waiting-bottom");
+  assert.equal(result.delayMs, 6000);
+  assert.equal(scrollCalls, 0);
+  assert.equal(scheduledCompletion.delayMs, 6000);
+});
+
 test("Topic Completion delay is sampled from the Reading Profile range", async () => {
   async function getCompletionDelay(randomValue) {
     const result = await continueTopicReading({
