@@ -96,7 +96,7 @@ test("Auto-like state does not change Candidate Source selection or Reading Queu
       fetchTopicPage: async (source, page) => {
         calls.push(`${source}:${page}`);
 
-        if (source === "unread") {
+        if (source === "new") {
           return topicList([
             topic({ id: 101, posts_count: 12 }),
             topic({ id: 102, posts_count: 1000 }),
@@ -118,7 +118,7 @@ test("Auto-like state does not change Candidate Source selection or Reading Queu
   const enabledResult = await buildQueueWithAutoLike(true);
 
   assert.deepEqual(disabledResult, {
-    calls: ["unread:0"],
+    calls: ["new:0"],
     queuedTopicIds: [101],
   });
   assert.deepEqual(enabledResult, disabledResult);
@@ -177,6 +177,10 @@ test("Auto-like state does not change Topic navigation, Topic Completion, or sto
         scheduledCompletion = { delayMs, advance };
       },
       advanceSession: session.advance,
+      readingProfile: {
+        minTopicCompletionDelayMs: 10000,
+        maxTopicCompletionDelayMs: 10000,
+      },
     });
     const completionAdvanceResult = await scheduledCompletion.advance();
     const stopResult = session.stop();

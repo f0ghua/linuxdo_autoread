@@ -18,7 +18,7 @@
 // ==/UserScript==
 
 const AutoReadCore = (() => {
-  const DEFAULT_CANDIDATE_SOURCES = ["unread", "new"];
+  const DEFAULT_CANDIDATE_SOURCES = ["new", "unread"];
   const DEFAULT_COMMENT_LIMIT = 1000;
   const DEFAULT_TOPIC_LIST_LIMIT = 100;
   const DEFAULT_MAX_TOPIC_PAGES = 10;
@@ -33,6 +33,8 @@ const AutoReadCore = (() => {
     maxScrollDelayMs: 420,
     topicStartDelayMs: 3500,
     bottomDelayMs: 10000,
+    minTopicCompletionDelayMs: 6000,
+    maxTopicCompletionDelayMs: 14000,
     maxConsecutiveTimingFailures: 12,
     minPostDwellMs: 250,
     maxPostDwellMs: 1200,
@@ -196,6 +198,28 @@ const AutoReadCore = (() => {
     return Boolean(topic) && topic.posts_count < commentLimit;
   }
 
+  function getTopicPostCount(topic) {
+    const postCount = Number(topic && topic.posts_count);
+
+    return Number.isFinite(postCount) && postCount >= 0
+      ? postCount
+      : Number.MAX_SAFE_INTEGER;
+  }
+
+  function sortTopicsByPostCount(topics = []) {
+    return topics
+      .map((topic, index) => ({
+        index,
+        postCount: getTopicPostCount(topic),
+        topic,
+      }))
+      .sort(
+        (left, right) =>
+          left.postCount - right.postCount || left.index - right.index
+      )
+      .map((entry) => entry.topic);
+  }
+
   function getTopicId(topic) {
     if (!topic || topic.id === undefined || topic.id === null) {
       return null;
@@ -265,11 +289,11 @@ const AutoReadCore = (() => {
       }
     }
 
-    if (eligibleTopics.length > topicListLimit) {
-      eligibleTopics = eligibleTopics.slice(0, topicListLimit);
-    }
+    eligibleTopics = sortTopicsByPostCount(eligibleTopics);
 
-    return eligibleTopics;
+    return eligibleTopics.length > topicListLimit
+      ? eligibleTopics.slice(0, topicListLimit)
+      : eligibleTopics;
   }
 
   async function selectReadingQueue({
@@ -338,6 +362,17 @@ const AutoReadCore = (() => {
     ]);
   }
 
+  function getTopicVisiblePostNumber(topicProgress = {}) {
+    const visiblePostNumbers = Array.isArray(topicProgress.visiblePostNumbers)
+      ? topicProgress.visiblePostNumbers
+      : [];
+
+    return getHighestPositiveInteger([
+      topicProgress.maxVisiblePostNumber,
+      ...visiblePostNumbers,
+    ]);
+  }
+
   function isTopicCompletionReached({
     viewportHeight,
     scrollY,
@@ -349,18 +384,26 @@ const AutoReadCore = (() => {
     const reachedRenderedBottom =
       viewportHeight + scrollY >= documentHeight - tolerance;
 
-    if (!reachedRenderedBottom) {
-      return false;
-    }
-
     const finalPostNumber = getTopicFinalPostNumber(topicProgress);
-    const currentPostNumber = getTopicCurrentPostNumber(topicProgress);
 
-    if (finalPostNumber !== null && currentPostNumber !== null) {
-      return currentPostNumber >= finalPostNumber - topicCompletionPostTolerance;
+    if (finalPostNumber !== null) {
+      const visiblePostNumber = getTopicVisiblePostNumber(topicProgress);
+
+      if (visiblePostNumber !== null && visiblePostNumber >= finalPostNumber) {
+        return true;
+      }
+
+      const currentPostNumber = getTopicCurrentPostNumber(topicProgress);
+
+      if (currentPostNumber !== null) {
+        return (
+          reachedRenderedBottom &&
+          currentPostNumber >= finalPostNumber - topicCompletionPostTolerance
+        );
+      }
     }
 
-    return true;
+    return reachedRenderedBottom;
   }
 
   function chooseBoundedInteger({ min, max, random }) {
@@ -395,6 +438,24 @@ const AutoReadCore = (() => {
         random,
       }),
     };
+  }
+
+  function chooseTopicCompletionDelay({
+    readingProfile = DEFAULT_READING_PROFILE,
+    random = Math.random,
+  } = {}) {
+    const profile = resolveReadingProfile(readingProfile);
+    const fallbackDelay =
+      getPositiveInteger(profile.bottomDelayMs) ||
+      DEFAULT_READING_PROFILE.bottomDelayMs;
+    const minDelay =
+      getPositiveInteger(profile.minTopicCompletionDelayMs) || fallbackDelay;
+    const maxDelay =
+      getPositiveInteger(profile.maxTopicCompletionDelayMs) || minDelay;
+    const min = Math.min(minDelay, maxDelay);
+    const max = Math.max(minDelay, maxDelay);
+
+    return chooseBoundedInteger({ min, max, random });
   }
 
   function createTopicStartDelayController({ getTopicKey = () => "" } = {}) {
@@ -914,8 +975,13 @@ const AutoReadCore = (() => {
         tolerance,
       })
     ) {
-      scheduleTopicCompletion(profile.bottomDelayMs, advanceSession);
-      return { status: "waiting-bottom", delayMs: profile.bottomDelayMs };
+      const completionDelayMs = chooseTopicCompletionDelay({
+        readingProfile: profile,
+        random,
+      });
+
+      scheduleTopicCompletion(completionDelayMs, advanceSession);
+      return { status: "waiting-bottom", delayMs: completionDelayMs };
     }
 
     if (shouldAbandonTopic(topicProgress, profile)) {
@@ -1132,6 +1198,7 @@ const AutoReadCore = (() => {
     buildReadingQueue,
     choosePostDwellDelay,
     chooseScrollAction,
+    chooseTopicCompletionDelay,
     createReadingQueueStorage,
     getTopicIdFromPathname,
     getTopicSessionKeyFromPathname,

@@ -82,7 +82,7 @@ test("Topic pages wait for rendered Posts before Topic Completion can advance", 
   assert.equal(advanceCalls, 0);
 });
 
-test("Topic Completion schedules advancement after the configured bottom delay", async () => {
+test("Topic Completion schedules advancement after the configured completion delay", async () => {
   let active = true;
   const openedUrls = [];
   let scheduledCompletion = null;
@@ -117,7 +117,8 @@ test("Topic Completion schedules advancement after the configured bottom delay",
     },
     advanceSession: session.advance,
     readingProfile: {
-      bottomDelayMs: 10000,
+      minTopicCompletionDelayMs: 10000,
+      maxTopicCompletionDelayMs: 10000,
     },
   });
 
@@ -311,6 +312,78 @@ test("Lazy-rendered bottom does not advance before the final Topic Post", async 
   assert.equal(result.status, "scrolling");
   assert.equal(scrollCalls, 1);
   assert.equal(scheduledCompletions, 0);
+});
+
+test("Final visible Topic Post completes without scrolling to the rendered page bottom", async () => {
+  let scrollCalls = 0;
+  let scheduledCompletion = null;
+
+  const result = await continueTopicReading({
+    isActive: () => true,
+    getTopicProgress: () => ({
+      highestPostNumber: 100,
+      maxVisiblePostNumber: 100,
+      visiblePostNumbers: [99, 100],
+    }),
+    getViewportMetrics: () => ({
+      viewportHeight: 800,
+      scrollY: 1200,
+      documentHeight: 4000,
+    }),
+    scrollTopic: () => {
+      scrollCalls += 1;
+    },
+    scheduleNextCheck: () => {
+      throw new Error("Completed Topics should not schedule another scroll check");
+    },
+    scheduleTopicCompletion: (delayMs, advance) => {
+      scheduledCompletion = { delayMs, advance };
+    },
+    advanceSession: () => ({ status: "opened" }),
+    readingProfile: {
+      minTopicCompletionDelayMs: 6000,
+      maxTopicCompletionDelayMs: 10000,
+      topicAbandonmentEnabled: false,
+    },
+    random: () => 0.25,
+  });
+
+  assert.equal(result.status, "waiting-bottom");
+  assert.equal(result.delayMs, 7000);
+  assert.equal(scrollCalls, 0);
+  assert.equal(scheduledCompletion.delayMs, 7000);
+});
+
+test("Topic Completion delay is sampled from the Reading Profile range", async () => {
+  async function getCompletionDelay(randomValue) {
+    const result = await continueTopicReading({
+      isActive: () => true,
+      getViewportMetrics: () => ({
+        viewportHeight: 800,
+        scrollY: 1100,
+        documentHeight: 2000,
+      }),
+      scrollTopic: () => {
+        throw new Error("Completed Topics should not continue scrolling");
+      },
+      scheduleNextCheck: () => {
+        throw new Error("Completed Topics should not schedule another check");
+      },
+      scheduleTopicCompletion: () => {},
+      advanceSession: () => ({ status: "opened" }),
+      readingProfile: {
+        minTopicCompletionDelayMs: 6000,
+        maxTopicCompletionDelayMs: 8000,
+      },
+      random: () => randomValue,
+    });
+
+    return result.delayMs;
+  }
+
+  assert.equal(await getCompletionDelay(0), 6000);
+  assert.equal(await getCompletionDelay(0.5), 7000);
+  assert.equal(await getCompletionDelay(1), 8000);
 });
 
 test("Inactive Auto-Reading Sessions do not scroll, schedule, or advance", async () => {
