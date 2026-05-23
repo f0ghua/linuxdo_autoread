@@ -441,6 +441,88 @@ test("Timeline final Topic Post completes after the final Post bottom edge is re
   assert.equal(scheduledCompletion.delayMs, 6000);
 });
 
+test("Single rendered Topic without timeline completes after its only Post is read through", async () => {
+  let scrollCalls = 0;
+  let scheduledCompletion = null;
+
+  const result = await continueTopicReading({
+    isActive: () => true,
+    getTopicProgress: () => ({
+      renderedPostCount: 1,
+      maxVisiblePostNumber: 1,
+      maxReadThroughPostNumber: 1,
+      visiblePostNumbers: [1],
+      readThroughPostNumbers: [1],
+    }),
+    getViewportMetrics: () => ({
+      viewportHeight: 960,
+      scrollY: 0,
+      documentHeight: 1160,
+    }),
+    scrollTopic: () => {
+      scrollCalls += 1;
+    },
+    scheduleNextCheck: () => {
+      throw new Error("Single read-through Topics should not keep scrolling");
+    },
+    scheduleTopicCompletion: (delayMs, advance) => {
+      scheduledCompletion = { delayMs, advance };
+    },
+    advanceSession: () => ({ status: "opened" }),
+    readingProfile: {
+      minTopicCompletionDelayMs: 6000,
+      maxTopicCompletionDelayMs: 6000,
+      topicAbandonmentEnabled: false,
+    },
+  });
+
+  assert.equal(result.status, "waiting-bottom");
+  assert.equal(result.delayMs, 6000);
+  assert.equal(scrollCalls, 0);
+  assert.equal(scheduledCompletion.delayMs, 6000);
+});
+
+test("Single rendered Topic without timeline waits until its only Post bottom is read", async () => {
+  let scrollCalls = 0;
+  let scheduledChecks = 0;
+  let scheduledCompletions = 0;
+
+  const result = await continueTopicReading({
+    isActive: () => true,
+    getTopicProgress: () => ({
+      renderedPostCount: 1,
+      maxVisiblePostNumber: 1,
+      visiblePostNumbers: [1],
+      readThroughPostNumbers: [],
+    }),
+    getViewportMetrics: () => ({
+      viewportHeight: 960,
+      scrollY: 0,
+      documentHeight: 1160,
+    }),
+    scrollTopic: () => {
+      scrollCalls += 1;
+    },
+    scheduleNextCheck: () => {
+      scheduledChecks += 1;
+    },
+    scheduleTopicCompletion: () => {
+      scheduledCompletions += 1;
+    },
+    advanceSession: () => {
+      throw new Error("Unread single Topic bottoms should not advance");
+    },
+    readingProfile: {
+      topicAbandonmentEnabled: false,
+    },
+  });
+
+  assert.equal(result.status, "scrolling");
+  assert.equal(scrollCalls, 1);
+  assert.equal(scheduledChecks, 1);
+  assert.equal(scheduledCompletions, 0);
+});
+
 test("Topic Completion delay is sampled from the Reading Profile range", async () => {
   async function getCompletionDelay(randomValue) {
     const result = await continueTopicReading({

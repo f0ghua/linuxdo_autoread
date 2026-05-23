@@ -103,6 +103,23 @@ test("One user action starts an Auto-Reading Session and renders Stop Reading", 
   assert.deepEqual(harness.readingQueueStorage.get(), [{ id: 102 }]);
 });
 
+test("Starting on the current Topic activates reading without opening the queue", () => {
+  const harness = createSessionHarness({
+    queues: [[{ id: 101, last_read_post_number: 7 }]],
+  });
+  harness.readingQueueStorage.set([{ id: 999 }]);
+
+  const result = harness.session.startCurrentTopic();
+
+  assert.equal(result.status, "reading-current-topic");
+  assert.equal(harness.active, true);
+  assert.equal(harness.clearTimerCalls, 1);
+  assert.equal(harness.queueBuilds, 0);
+  assert.deepEqual(harness.labels, ["Stop Reading"]);
+  assert.deepEqual(harness.openedUrls, []);
+  assert.deepEqual(harness.readingQueueStorage.get(), []);
+});
+
 test("Stop Reading clears active session state, timers, and Reading Queue state", () => {
   const harness = createSessionHarness({ initialActive: true });
   harness.readingQueueStorage.set([{ id: 101 }, { id: 102 }]);

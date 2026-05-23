@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Read
 // @namespace    http://tampermonkey.net/
-// @version      1.4.10
+// @version      1.4.11
 // @description  自动刷linuxdo文章
 // @author       liuweiqing
 // @match        https://meta.discourse.org/*
@@ -398,10 +398,9 @@ const AutoReadCore = (() => {
       viewportHeight + scrollY >= documentHeight - tolerance;
 
     const finalPostNumber = getTopicFinalPostNumber(topicProgress);
+    const readThroughPostNumber = getTopicReadThroughPostNumber(topicProgress);
 
     if (finalPostNumber !== null) {
-      const readThroughPostNumber = getTopicReadThroughPostNumber(topicProgress);
-
       if (
         readThroughPostNumber !== null &&
         readThroughPostNumber >= finalPostNumber
@@ -427,6 +426,14 @@ const AutoReadCore = (() => {
           currentPostNumber >= finalPostNumber - topicCompletionPostTolerance
         );
       }
+    }
+
+    if (
+      finalPostNumber === null &&
+      topicProgress.renderedPostCount === 1 &&
+      readThroughPostNumber !== null
+    ) {
+      return true;
     }
 
     return reachedRenderedBottom;
@@ -1168,6 +1175,17 @@ const AutoReadCore = (() => {
       return advance();
     }
 
+    function startCurrentTopic() {
+      setActiveState(true);
+      readStatePauseReason = null;
+      readingQueueStorage.clear();
+      clearTimers();
+      setControlTitle("");
+      setControlLabel(sessionLabels.stop);
+
+      return { status: "reading-current-topic" };
+    }
+
     function stop(message, options = {}) {
       setActiveState(false);
       readStatePauseReason = null;
@@ -1196,6 +1214,7 @@ const AutoReadCore = (() => {
       pause,
       resume,
       start,
+      startCurrentTopic,
       stop,
       toggle,
     };
@@ -1671,6 +1690,28 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     return postNumbers;
   }
 
+  function getRenderedPostNumbers() {
+    const postNumbers = [];
+    const seenRoots = new Set();
+
+    document
+      .querySelectorAll(".topic-post, article[data-post-id], .post-stream .topic-body")
+      .forEach((element) => {
+        const root = getPostRootElement(element);
+        if (seenRoots.has(root)) {
+          return;
+        }
+
+        const postNumber = getPostElementNumber(root);
+        if (postNumber !== null) {
+          postNumbers.push(postNumber);
+        }
+        seenRoots.add(root);
+      });
+
+    return postNumbers;
+  }
+
   function getPostNumberFromPathname() {
     const postNumberMatch = window.location.pathname.match(
       /^\/t\/[^/]+\/\d+\/(\d+)\/?$/
@@ -1699,6 +1740,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
 
   function getTopicProgressMetrics() {
     const timelineProgress = getTimelineTopicProgress();
+    const renderedPostNumbers = getRenderedPostNumbers();
     const visiblePostNumbers = getVisiblePostNumbers();
     const readThroughPostNumbers = getReadThroughPostNumbers();
     const maxVisiblePostNumber =
@@ -1714,6 +1756,8 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
         timelineProgress.currentPostNumber || getPostNumberFromPathname(),
       maxVisiblePostNumber,
       maxReadThroughPostNumber,
+      renderedPostCount: renderedPostNumbers.length,
+      renderedPostNumbers,
       visiblePostNumbers,
       readThroughPostNumbers,
     };
@@ -1914,7 +1958,18 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   });
 
   button.onclick = function () {
-    autoReadingSession.toggle();
+    if (autoReadingSession.isActive()) {
+      autoReadingSession.stop();
+      return;
+    }
+
+    if (isTopicPage()) {
+      autoReadingSession.startCurrentTopic();
+      checkScroll();
+      return;
+    }
+
+    autoReadingSession.start();
   };
 
   document.addEventListener("visibilitychange", handleReadStateTrustChange);
