@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Read
 // @namespace    http://tampermonkey.net/
-// @version      1.4.9
+// @version      1.4.10
 // @description  自动刷linuxdo文章
 // @author       liuweiqing
 // @match        https://meta.discourse.org/*
@@ -1532,9 +1532,10 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   }
 
   function getMatchingElementAttribute(element, selector, attributeName) {
-    const matchingElement = element.matches(selector)
-      ? element
-      : element.querySelector(selector);
+    const matchingElement =
+      (element.matches(selector) ? element : null) ||
+      element.closest(selector) ||
+      element.querySelector(selector);
 
     return matchingElement ? matchingElement.getAttribute(attributeName) : null;
   }
@@ -1550,6 +1551,16 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     return Number.isInteger(numericPostNumber) && numericPostNumber > 0
       ? numericPostNumber
       : null;
+  }
+
+  function getPostReadThroughElement(element) {
+    return (
+      (element.matches(".topic-body .cooked, .topic-body, .cooked")
+        ? element
+        : null) ||
+      element.querySelector(".topic-body .cooked, .topic-body, .cooked") ||
+      element
+    );
   }
 
   function isElementReadThroughForCompletion(element) {
@@ -1642,7 +1653,11 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       .querySelectorAll(".topic-post, article[data-post-id], .post-stream .topic-body")
       .forEach((element) => {
         const root = getPostRootElement(element);
-        if (seenRoots.has(root) || !isElementReadThroughForCompletion(root)) {
+        const readThroughElement = getPostReadThroughElement(root);
+        if (
+          seenRoots.has(root) ||
+          !isElementReadThroughForCompletion(readThroughElement)
+        ) {
           return;
         }
 
