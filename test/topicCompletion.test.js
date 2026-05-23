@@ -314,7 +314,7 @@ test("Lazy-rendered bottom does not advance before the final Topic Post", async 
   assert.equal(scheduledCompletions, 0);
 });
 
-test("Final visible Topic Post completes without scrolling to the rendered page bottom", async () => {
+test("Final read-through Topic Post completes without scrolling to the rendered page bottom", async () => {
   let scrollCalls = 0;
   let scheduledCompletion = null;
 
@@ -323,7 +323,9 @@ test("Final visible Topic Post completes without scrolling to the rendered page 
     getTopicProgress: () => ({
       highestPostNumber: 100,
       maxVisiblePostNumber: 100,
+      maxReadThroughPostNumber: 100,
       visiblePostNumbers: [99, 100],
+      readThroughPostNumbers: [99, 100],
     }),
     getViewportMetrics: () => ({
       viewportHeight: 800,
@@ -354,7 +356,50 @@ test("Final visible Topic Post completes without scrolling to the rendered page 
   assert.equal(scheduledCompletion.delayMs, 7000);
 });
 
-test("Timeline final Topic Post completes without scrolling to the rendered page bottom", async () => {
+test("Final Topic Post top edge does not complete before the bottom edge is read", async () => {
+  let scrollCalls = 0;
+  let scheduledChecks = 0;
+  let scheduledCompletions = 0;
+
+  const result = await continueTopicReading({
+    isActive: () => true,
+    getTopicProgress: () => ({
+      currentPostNumber: 100,
+      highestPostNumber: 100,
+      maxVisiblePostNumber: 100,
+      maxReadThroughPostNumber: 99,
+      visiblePostNumbers: [100],
+      readThroughPostNumbers: [99],
+    }),
+    getViewportMetrics: () => ({
+      viewportHeight: 800,
+      scrollY: 1200,
+      documentHeight: 4000,
+    }),
+    scrollTopic: () => {
+      scrollCalls += 1;
+    },
+    scheduleNextCheck: () => {
+      scheduledChecks += 1;
+    },
+    scheduleTopicCompletion: () => {
+      scheduledCompletions += 1;
+    },
+    advanceSession: () => {
+      throw new Error("Unread final Post bottoms should not advance");
+    },
+    readingProfile: {
+      topicAbandonmentEnabled: false,
+    },
+  });
+
+  assert.equal(result.status, "scrolling");
+  assert.equal(scrollCalls, 1);
+  assert.equal(scheduledChecks, 1);
+  assert.equal(scheduledCompletions, 0);
+});
+
+test("Timeline final Topic Post completes after the final Post bottom edge is read", async () => {
   let scrollCalls = 0;
   let scheduledCompletion = null;
 
@@ -364,7 +409,9 @@ test("Timeline final Topic Post completes without scrolling to the rendered page
       currentPostNumber: 100,
       highestPostNumber: 100,
       maxVisiblePostNumber: null,
+      maxReadThroughPostNumber: 100,
       visiblePostNumbers: [],
+      readThroughPostNumbers: [100],
     }),
     getViewportMetrics: () => ({
       viewportHeight: 800,

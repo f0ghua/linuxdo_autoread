@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Read
 // @namespace    http://tampermonkey.net/
-// @version      1.4.8
+// @version      1.4.9
 // @description  自动刷linuxdo文章
 // @author       liuweiqing
 // @match        https://meta.discourse.org/*
@@ -373,6 +373,19 @@ const AutoReadCore = (() => {
     ]);
   }
 
+  function getTopicReadThroughPostNumber(topicProgress = {}) {
+    const readThroughPostNumbers = Array.isArray(
+      topicProgress.readThroughPostNumbers
+    )
+      ? topicProgress.readThroughPostNumbers
+      : [];
+
+    return getHighestPositiveInteger([
+      topicProgress.maxReadThroughPostNumber,
+      ...readThroughPostNumbers,
+    ]);
+  }
+
   function isTopicCompletionReached({
     viewportHeight,
     scrollY,
@@ -387,19 +400,28 @@ const AutoReadCore = (() => {
     const finalPostNumber = getTopicFinalPostNumber(topicProgress);
 
     if (finalPostNumber !== null) {
+      const readThroughPostNumber = getTopicReadThroughPostNumber(topicProgress);
+
+      if (
+        readThroughPostNumber !== null &&
+        readThroughPostNumber >= finalPostNumber
+      ) {
+        return true;
+      }
+
       const visiblePostNumber = getTopicVisiblePostNumber(topicProgress);
 
-      if (visiblePostNumber !== null && visiblePostNumber >= finalPostNumber) {
-        return true;
+      if (
+        visiblePostNumber !== null &&
+        visiblePostNumber >= finalPostNumber &&
+        !reachedRenderedBottom
+      ) {
+        return false;
       }
 
       const currentPostNumber = getTopicCurrentPostNumber(topicProgress);
 
       if (currentPostNumber !== null) {
-        if (currentPostNumber >= finalPostNumber) {
-          return true;
-        }
-
         return (
           reachedRenderedBottom &&
           currentPostNumber >= finalPostNumber - topicCompletionPostTolerance
@@ -1517,6 +1539,30 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     return matchingElement ? matchingElement.getAttribute(attributeName) : null;
   }
 
+  function getPostElementNumber(element) {
+    const postNumber = getMatchingElementAttribute(
+      element,
+      ".topic-post[data-post-number], [data-post-number]",
+      "data-post-number"
+    );
+    const numericPostNumber = Number(postNumber);
+
+    return Number.isInteger(numericPostNumber) && numericPostNumber > 0
+      ? numericPostNumber
+      : null;
+  }
+
+  function isElementReadThroughForCompletion(element) {
+    const rect = element.getBoundingClientRect();
+
+    return (
+      rect.width > 0 &&
+      rect.height > 0 &&
+      rect.top < window.innerHeight &&
+      rect.bottom <= window.innerHeight
+    );
+  }
+
   function getPostElementKey(element, fallbackIndex) {
     const textPreview = (element.textContent || "").trim().slice(0, 80);
     const postNumber = getMatchingElementAttribute(
@@ -1588,6 +1634,28 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     return postNumbers;
   }
 
+  function getReadThroughPostNumbers() {
+    const postNumbers = [];
+    const seenRoots = new Set();
+
+    document
+      .querySelectorAll(".topic-post, article[data-post-id], .post-stream .topic-body")
+      .forEach((element) => {
+        const root = getPostRootElement(element);
+        if (seenRoots.has(root) || !isElementReadThroughForCompletion(root)) {
+          return;
+        }
+
+        const postNumber = getPostElementNumber(root);
+        if (postNumber !== null) {
+          postNumbers.push(postNumber);
+        }
+        seenRoots.add(root);
+      });
+
+    return postNumbers;
+  }
+
   function getPostNumberFromPathname() {
     const postNumberMatch = window.location.pathname.match(
       /^\/t\/[^/]+\/\d+\/(\d+)\/?$/
@@ -1617,15 +1685,22 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   function getTopicProgressMetrics() {
     const timelineProgress = getTimelineTopicProgress();
     const visiblePostNumbers = getVisiblePostNumbers();
+    const readThroughPostNumbers = getReadThroughPostNumbers();
     const maxVisiblePostNumber =
       visiblePostNumbers.length > 0 ? Math.max(...visiblePostNumbers) : null;
+    const maxReadThroughPostNumber =
+      readThroughPostNumbers.length > 0
+        ? Math.max(...readThroughPostNumbers)
+        : null;
 
     return {
       ...timelineProgress,
       currentPostNumber:
         timelineProgress.currentPostNumber || getPostNumberFromPathname(),
       maxVisiblePostNumber,
+      maxReadThroughPostNumber,
       visiblePostNumbers,
+      readThroughPostNumbers,
     };
   }
 
