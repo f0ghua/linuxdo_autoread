@@ -1,14 +1,10 @@
 // ==UserScript==
 // @name         Auto Read
 // @namespace    http://tampermonkey.net/
-// @version      1.4.11
+// @version      1.4.13
 // @description  自动刷linuxdo文章
 // @author       liuweiqing
-// @match        https://meta.discourse.org/*
 // @match        https://linux.do/*
-// @match        https://meta.appinn.net/*
-// @match        https://community.openai.com/
-// @match        https://idcflare.com/*
 // @exclude      https://linux.do/a/9611/0
 // @grant        none
 // @license      MIT
@@ -1264,17 +1260,15 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
 } else {
   (function () {
   ("use strict");
-  // 定义可能的基本URL
-  const possibleBaseURLs = [
-    "https://linux.do",
-    "https://meta.discourse.org",
-    "https://meta.appinn.net",
-    "https://community.openai.com",
-    "https://idcflare.com/",
-  ];
-  const commentLimit = AutoReadCore.DEFAULT_COMMENT_LIMIT;
-  const topicListLimit = AutoReadCore.DEFAULT_TOPIC_LIST_LIMIT;
-  const maxTopicPages = AutoReadCore.DEFAULT_MAX_TOPIC_PAGES;
+  const BASE_URL = "https://linux.do";
+  const topicListPath = "/new";
+  const topicListUrl = `${BASE_URL}${topicListPath}`;
+  const topicListNavigationDelay = 1500;
+  const topicListWaitDelay = 2000;
+  const maxTopicListWaitAttempts = 10;
+  const recentReadTopicStorageKey = "recentReadTopicIds";
+  const recentReadTopicLimit = 2;
+  const staleTopicListRefreshStorageKey = "staleTopicListRefreshTopicId";
   const likeLimit = 50;
   const readingQueueStorage = AutoReadCore.createReadingQueueStorage({
     storage: localStorage,
@@ -1303,21 +1297,6 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     globalObject: window,
     timingMonitor: timingRequestMonitor,
   });
-  const topicSources = AutoReadCore.DEFAULT_CANDIDATE_SOURCES;
-  // 获取当前页面的URL
-  const currentURL = window.location.href;
-
-  // 确定当前页面对应的BASE_URL
-  let BASE_URL = possibleBaseURLs.find((url) => currentURL.startsWith(url));
-  console.log("currentURL:", currentURL);
-  // 环境变量：阅读网址，如果没有找到匹配的URL，则默认为第一个
-  if (!BASE_URL) {
-    BASE_URL = possibleBaseURLs[0];
-    console.log("默认BASE_URL设置为: " + BASE_URL);
-  } else {
-    console.log("当前BASE_URL是: " + BASE_URL);
-  }
-  BASE_URL = BASE_URL.replace(/\/$/, "");
 
   console.log("脚本正在运行在: " + BASE_URL);
   //1.进入网页 https://linux.do/t/topic/数字（1，2，3，4）
@@ -1341,8 +1320,12 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   }
   const topicReadinessDelay = 2000; // Topic Posts render check interval.
   let checkScrollTimeout = null;
+  let routeCheckTimeout = null;
   let autoLikeInterval = null;
   let openingTopic = false;
+  let topicClickStartedAt = null;
+  let topicListWaitAttempts = 0;
+  let autoLikedTopicKey = null;
   const abandonedTopicTracker = AutoReadCore.createAbandonedTopicTracker({
     getCurrentTopicId: () =>
       AutoReadCore.getTopicIdFromPathname(window.location.pathname),
@@ -1374,6 +1357,10 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     return /^\/t\/[^/]+\/\d+(?:\/\d+)?\/?$/.test(window.location.pathname);
   }
 
+  function isTopicListPage() {
+    return window.location.pathname.replace(/\/+$/, "") === topicListPath;
+  }
+
   function getCurrentTopicSessionKey() {
     return AutoReadCore.getTopicSessionKeyFromPathname(window.location.pathname);
   }
@@ -1383,22 +1370,23 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       clearTimeout(checkScrollTimeout);
       checkScrollTimeout = null;
     }
+    if (routeCheckTimeout !== null) {
+      clearTimeout(routeCheckTimeout);
+      routeCheckTimeout = null;
+    }
     topicStartDelayController.reset();
     visiblePostDwellController.reset();
     topicAbandonmentController.reset();
+    autoLikedTopicKey = null;
     localStorage.removeItem("navigatingToNextTopic");
+    localStorage.removeItem(staleTopicListRefreshStorageKey);
   }
 
   let autoReadingSession = null;
 
   function continueAfterTrustedPageState() {
     autoReadingSession.resume();
-
-    if (isTopicPage()) {
-      checkScroll();
-    } else {
-      openNewTopic();
-    }
+    continueAutoReadFlow();
   }
 
   function handleReadStateTrustChange() {
@@ -1421,75 +1409,250 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     window.scrollBy(0, scrollAction.stepPixels);
   }
 
-  async function fetchTopicPage(source, page) {
-    const url = `${BASE_URL}/${source}.json?no_definitions=true&page=${page}`;
-    const response = await fetch(url, {
-      credentials: "same-origin",
-      headers: {
-        Accept: "application/json",
-      },
-    });
+  function scheduleActiveRouteCheck(delayMs = topicListNavigationDelay) {
+    if (routeCheckTimeout !== null) {
+      clearTimeout(routeCheckTimeout);
+    }
+    routeCheckTimeout = setTimeout(() => {
+      routeCheckTimeout = null;
+      continueAutoReadFlow();
+    }, delayMs);
+  }
 
-    let result = null;
+  function getTopicIdFromLink(link) {
     try {
-      result = await response.json();
+      const url = new URL(link.href, BASE_URL);
+      return AutoReadCore.getTopicIdFromPathname(url.pathname);
     } catch (error) {
-      throw new Error(`${source}.json 没有返回 JSON，可能被登录或验证拦截`);
+      return null;
     }
-
-    if (result && result.error_type === "not_logged_in") {
-      const error = new Error("请先登录 linux.do，再启动自动阅读。");
-      error.name = "LoginRequiredError";
-      throw error;
-    }
-
-    if (!response.ok) {
-      throw new Error(`${source}.json 请求失败：HTTP ${response.status}`);
-    }
-
-    return result;
   }
 
-  async function getTopicsFromSource(source) {
-    return AutoReadCore.getEligibleTopicsFromSource({
-      source,
-      fetchTopicPage,
-      commentLimit,
-      maxTopicPages,
-      topicListLimit,
-    });
-  }
-
-  async function getReadingQueue() {
-    const selectedQueue = await AutoReadCore.selectReadingQueue({
-      fetchTopicPage,
-      candidateSources: topicSources,
-      commentLimit,
-      maxTopicPages,
-      topicListLimit,
-      isTopicExcluded: abandonedTopicTracker.isTopicAbandoned,
-    });
-
-    if (selectedQueue.topics.length > 0) {
-      console.log(
-        `从 ${selectedQueue.source}.json 获取到 ${selectedQueue.topics.length} 个主题`
-      );
+  function getRecentReadTopicIds() {
+    const recentReadTopicIds = localStorage.getItem(recentReadTopicStorageKey);
+    if (!recentReadTopicIds) {
+      return [];
     }
 
-    return selectedQueue.topics;
-  }
-
-  async function openNewTopic() {
-    if (openingTopic) {
-      return { status: "opening" };
-    }
-
-    openingTopic = true;
     try {
-      return await autoReadingSession.advance();
-    } finally {
-      openingTopic = false;
+      const parsedTopicIds = JSON.parse(recentReadTopicIds);
+      return Array.isArray(parsedTopicIds)
+        ? parsedTopicIds.filter((topicId) => topicId !== null).map(String)
+        : [];
+    } catch (error) {
+      localStorage.removeItem(recentReadTopicStorageKey);
+      return [];
     }
+  }
+
+  function recordRecentReadTopic(topicId) {
+    if (topicId === null) {
+      return;
+    }
+
+    const normalizedTopicId = String(topicId);
+    const recentReadTopicIds = [
+      normalizedTopicId,
+      ...getRecentReadTopicIds().filter(
+        (recentTopicId) => recentTopicId !== normalizedTopicId
+      ),
+    ].slice(0, recentReadTopicLimit);
+
+    localStorage.setItem(
+      recentReadTopicStorageKey,
+      JSON.stringify(recentReadTopicIds)
+    );
+  }
+
+  function recordCurrentTopicRead() {
+    recordRecentReadTopic(
+      AutoReadCore.getTopicIdFromPathname(window.location.pathname)
+    );
+  }
+
+  function isRecentlyReadTopicId(topicId) {
+    return topicId !== null && getRecentReadTopicIds().includes(String(topicId));
+  }
+
+  function isUsableTopicListLink(link) {
+    const topicId = getTopicIdFromLink(link);
+    if (
+      topicId === null ||
+      abandonedTopicTracker.isTopicAbandoned({ id: topicId })
+    ) {
+      return false;
+    }
+
+    const rect = link.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function getTopicListLinks() {
+    const selectors = [
+      "#list-area .topic-list .topic-list-item .main-link a.title",
+      "#list-area .topic-list .topic-list-item a.raw-topic-link",
+      ".topic-list-item .main-link a.title",
+      ".topic-list-item a.raw-topic-link",
+      "a.title.raw-link.raw-topic-link",
+      "a.raw-topic-link",
+    ];
+
+    return Array.from(document.querySelectorAll(selectors.join(","))).filter(
+      isUsableTopicListLink
+    );
+  }
+
+  function getFirstTopicListLink() {
+    return getTopicListLinks()[0] || null;
+  }
+
+  function getFirstUnreadTopicListLink() {
+    return (
+      getTopicListLinks().find(
+        (link) => !isRecentlyReadTopicId(getTopicIdFromLink(link))
+      ) || null
+    );
+  }
+
+  function refreshStaleTopicList(topicId) {
+    console.log("new 页面第一个主题刚读过，刷新列表后再读取。", topicId);
+    localStorage.setItem(staleTopicListRefreshStorageKey, String(topicId));
+    openingTopic = false;
+    topicClickStartedAt = null;
+    window.location.reload();
+
+    return { status: "refreshing-stale-topic-list", topicId };
+  }
+
+  function chooseTopicListLink() {
+    const firstTopicLink = getFirstTopicListLink();
+    if (!firstTopicLink) {
+      return null;
+    }
+
+    const firstTopicId = getTopicIdFromLink(firstTopicLink);
+    if (!isRecentlyReadTopicId(firstTopicId)) {
+      localStorage.removeItem(staleTopicListRefreshStorageKey);
+      return firstTopicLink;
+    }
+
+    const refreshedTopicId = localStorage.getItem(
+      staleTopicListRefreshStorageKey
+    );
+    if (refreshedTopicId !== String(firstTopicId)) {
+      return refreshStaleTopicList(firstTopicId);
+    }
+
+    localStorage.removeItem(staleTopicListRefreshStorageKey);
+    return getFirstUnreadTopicListLink();
+  }
+
+  function openFirstTopicFromList() {
+    if (openingTopic) {
+      const topicClickTimedOut =
+        topicClickStartedAt !== null && Date.now() - topicClickStartedAt > 8000;
+
+      if (!topicClickTimedOut) {
+        scheduleActiveRouteCheck(topicListNavigationDelay);
+        return { status: "opening" };
+      }
+
+      openingTopic = false;
+      topicClickStartedAt = null;
+    }
+
+    const topicLink = chooseTopicListLink();
+    if (topicLink && topicLink.status === "refreshing-stale-topic-list") {
+      return topicLink;
+    }
+
+    if (!topicLink) {
+      topicListWaitAttempts += 1;
+
+      if (topicListWaitAttempts >= maxTopicListWaitAttempts) {
+        return autoReadingSession.stop("new 页面没有可点击主题，已停止自动阅读。");
+      }
+
+      scheduleActiveRouteCheck(topicListWaitDelay);
+      return { status: "waiting-topic-list" };
+    }
+
+    topicListWaitAttempts = 0;
+    openingTopic = true;
+    topicClickStartedAt = Date.now();
+    localStorage.setItem("navigatingToNextTopic", "true");
+    topicLink.scrollIntoView({ block: "center" });
+    topicLink.click();
+    scheduleActiveRouteCheck(topicListNavigationDelay);
+
+    return { status: "clicked-topic", url: topicLink.href };
+  }
+
+  function goToTopicList() {
+    if (window.location.href === topicListUrl) {
+      scheduleActiveRouteCheck(topicListNavigationDelay);
+      return { status: "already-topic-list" };
+    }
+
+    window.location.href = topicListUrl;
+    return { status: "opening-topic-list", url: topicListUrl };
+  }
+
+  function goBackToTopicList() {
+    recordCurrentTopicRead();
+    clearReadTimers();
+    openingTopic = false;
+    topicClickStartedAt = null;
+    topicListWaitAttempts = 0;
+
+    if (window.history.length > 1) {
+      window.history.back();
+      scheduleActiveRouteCheck(topicListNavigationDelay);
+      return { status: "back-to-topic-list" };
+    }
+
+    window.location.href = topicListUrl;
+    return { status: "opening-topic-list", url: topicListUrl };
+  }
+
+  function continueAutoReadFlow() {
+    if (!autoReadingSession || !autoReadingSession.isActive()) {
+      return { status: "inactive" };
+    }
+
+    const readStateTrust = readStateTrustGuard.getTrustState();
+    if (readStateTrust.trusted === false) {
+      return autoReadingSession.pause(readStateTrust.reason);
+    }
+
+    if (autoReadingSession.getPauseReason() !== null) {
+      autoReadingSession.resume();
+    }
+
+    if (isTopicPage()) {
+      openingTopic = false;
+      topicClickStartedAt = null;
+      topicListWaitAttempts = 0;
+      checkScroll();
+      runAutoLikeOnceForCurrentTopic();
+      return { status: "reading-topic" };
+    }
+
+    if (isTopicListPage()) {
+      return openFirstTopicFromList();
+    }
+
+    return goToTopicList();
+  }
+
+  function runAutoLikeOnceForCurrentTopic() {
+    const topicKey = getCurrentTopicSessionKey();
+    if (autoLikedTopicKey === topicKey) {
+      return;
+    }
+
+    autoLikedTopicKey = topicKey;
+    autoLikeController.runIfEnabled(autoLike);
   }
 
   function getRenderedDocumentHeight() {
@@ -1804,7 +1967,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       },
       advanceSession: ({ reason } = {}) => {
         console.log(reason === "abandoned-topic" ? "中途跳过主题" : "已滚动到底部");
-        return openNewTopic();
+        return goBackToTopicList();
       },
     });
   }
@@ -1820,12 +1983,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     );
     if (isReadingEnabled()) {
       console.log("执行正常的滚动和检查逻辑");
-      if (isTopicPage()) {
-        checkScroll();
-      } else {
-        openNewTopic();
-      }
-      autoLikeController.runIfEnabled(autoLike);
+      continueAutoReadFlow();
     }
   }
 
@@ -1933,10 +2091,9 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       localStorage.setItem("read", active.toString());
     },
     getReadStateTrust: readStateTrustGuard.getTrustState,
-    getReadingQueue,
-    navigateTo: (url) => {
-      localStorage.setItem("navigatingToNextTopic", "true");
-      window.location.href = url;
+    getReadingQueue: async () => [],
+    navigateTo: () => {
+      goToTopicList();
     },
     readingQueueStorage: sessionReadingQueueStorage,
     clearTimers: clearReadTimers,
@@ -1963,18 +2120,25 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       return;
     }
 
-    if (isTopicPage()) {
-      autoReadingSession.startCurrentTopic();
-      checkScroll();
-      return;
-    }
-
-    autoReadingSession.start();
+    autoReadingSession.startCurrentTopic();
+    continueAutoReadFlow();
   };
 
   document.addEventListener("visibilitychange", handleReadStateTrustChange);
   window.addEventListener("focus", handleReadStateTrustChange);
   window.addEventListener("blur", handleReadStateTrustChange);
+  window.addEventListener("popstate", () => {
+    openingTopic = false;
+    topicClickStartedAt = null;
+    scheduleActiveRouteCheck(topicListNavigationDelay);
+  });
+  window.addEventListener("pageshow", () => {
+    openingTopic = false;
+    topicClickStartedAt = null;
+    if (isReadingEnabled()) {
+      scheduleActiveRouteCheck(topicListNavigationDelay);
+    }
+  });
 
   //自动点赞按钮
   // 在页面上添加一个控制自动点赞的按钮
