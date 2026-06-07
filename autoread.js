@@ -1,14 +1,16 @@
 // ==UserScript==
 // @name         Auto Read
 // @namespace    http://tampermonkey.net/
-// @version      1.4.13
-// @description  自动刷linuxdo文章
+// @version      1.4.14
+// @description  自动阅读 Discourse 论坛文章
 // @author       liuweiqing
 // @match        https://linux.do/*
+// @match        https://nodeloc.com/*
+// @match        https://www.nodeloc.com/*
 // @exclude      https://linux.do/a/9611/0
 // @grant        none
 // @license      MIT
-// @icon         https://www.google.com/s2/favicons?domain=linux.do
+// @icon         https://www.google.com/s2/favicons?domain=discourse.org
 // @downloadURL https://update.greasyfork.org/scripts/489464/Auto%20Read.user.js
 // @updateURL https://update.greasyfork.org/scripts/489464/Auto%20Read.meta.js
 // ==/UserScript==
@@ -1260,8 +1262,41 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
 } else {
   (function () {
   ("use strict");
-  const BASE_URL = "https://linux.do";
-  const topicListPath = "/new";
+  const SITE_CONFIGS = {
+    "linux.do": {
+      siteName: "linux.do",
+      topicListPath: "/new",
+    },
+    "nodeloc.com": {
+      siteName: "nodeloc.com",
+      topicListPath: "/new",
+    },
+    "www.nodeloc.com": {
+      siteName: "nodeloc.com",
+      topicListPath: "/new",
+    },
+  };
+
+  function resolveSiteConfig(location) {
+    const config = SITE_CONFIGS[location.hostname];
+    if (!config) {
+      return null;
+    }
+
+    return {
+      ...config,
+      baseUrl: location.origin,
+    };
+  }
+
+  const siteConfig = resolveSiteConfig(window.location);
+  if (!siteConfig) {
+    console.warn("Auto Read 不支持当前站点:", window.location.hostname);
+    return;
+  }
+
+  const BASE_URL = siteConfig.baseUrl;
+  const topicListPath = siteConfig.topicListPath;
   const topicListUrl = `${BASE_URL}${topicListPath}`;
   const topicListNavigationDelay = 1500;
   const topicListWaitDelay = 2000;
@@ -1298,8 +1333,8 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     timingMonitor: timingRequestMonitor,
   });
 
-  console.log("脚本正在运行在: " + BASE_URL);
-  //1.进入网页 https://linux.do/t/topic/数字（1，2，3，4）
+  console.log("脚本正在运行在: " + siteConfig.siteName, BASE_URL);
+  //1.进入网页 https://<supported-site>/t/topic/数字（1，2，3，4）
   //2.使滚轮均衡的往下移动模拟刷文章
   // 检查是否是第一次运行脚本
   function checkFirstRun() {
