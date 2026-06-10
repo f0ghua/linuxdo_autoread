@@ -1305,12 +1305,16 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
 
   const BASE_URL = siteConfig.baseUrl;
   const topicListPath = siteConfig.topicListPath;
-  const topicListUrl = `${BASE_URL}${topicListPath}`;
   const topicListNavigationDelay = 1500;
   const topicListWaitDelay = 2000;
   const maxTopicListWaitAttempts = 10;
+  const settingsStorageKey = "autoReadSettings";
   const recentReadTopicStorageKey = "recentReadTopicIds";
   const recentReadTopicLimit = 2;
+  const visitedTopicStorageKey = "autoReadVisitedTopicIds";
+  const visitedTopicLimit = 1000;
+  const visitedTopicTtlMs = 72 * 60 * 60 * 1000;
+  const activeTopicListIndexStorageKey = "autoReadActiveTopicListIndex";
   const staleTopicListRefreshStorageKey = "staleTopicListRefreshTopicId";
   const diagnosticLogStorageKey = "autoReadDiagnosticLogs";
   const diagnosticLogLimit = 200;
@@ -1320,6 +1324,13 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   const returningStartedAtStorageKey = "autoReadReturningStartedAt";
   const topicListReturnFallbackDelay = 2500;
   const likeLimit = 50;
+  const DEFAULT_SETTINGS = {
+    minPostDwellSeconds: 0.25,
+    maxPostDwellSeconds: 1.2,
+    minTopicCompletionSeconds: 6,
+    maxTopicCompletionSeconds: 14,
+    topicListPaths: [siteConfig.topicListPath],
+  };
   const readingQueueStorage = AutoReadCore.createReadingQueueStorage({
     storage: localStorage,
   });
@@ -1349,6 +1360,157 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   });
 
   console.log("脚本正在运行在: " + siteConfig.siteName, BASE_URL);
+
+  function parsePositiveSeconds(value, fallbackSeconds) {
+    const seconds = Number(value);
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : fallbackSeconds;
+  }
+
+  function normalizeTopicListPath(path) {
+    const trimmedPath = String(path || "").trim();
+    if (!trimmedPath) {
+      return null;
+    }
+
+    try {
+      const url = new URL(trimmedPath, BASE_URL);
+      if (url.origin !== BASE_URL) {
+        return null;
+      }
+
+      const pathname = url.pathname.replace(/\/+$/, "") || "/";
+      return pathname.startsWith("/") ? pathname : `/${pathname}`;
+    } catch (error) {
+      const pathname = trimmedPath.replace(/\/+$/, "") || "/";
+      return pathname.startsWith("/") ? pathname : `/${pathname}`;
+    }
+  }
+
+  function normalizeTopicListPaths(paths) {
+    const normalizedPaths = [];
+    const seenPaths = new Set();
+    const sourcePaths = Array.isArray(paths)
+      ? paths
+      : DEFAULT_SETTINGS.topicListPaths;
+
+    sourcePaths.forEach((path) => {
+      const normalizedPath = normalizeTopicListPath(path);
+      if (normalizedPath !== null && !seenPaths.has(normalizedPath)) {
+        seenPaths.add(normalizedPath);
+        normalizedPaths.push(normalizedPath);
+      }
+    });
+
+    return normalizedPaths.length > 0
+      ? normalizedPaths
+      : DEFAULT_SETTINGS.topicListPaths;
+  }
+
+  function normalizeSettings(settings = {}) {
+    const minPostDwellSeconds = parsePositiveSeconds(
+      settings.minPostDwellSeconds,
+      DEFAULT_SETTINGS.minPostDwellSeconds
+    );
+    const maxPostDwellSeconds = parsePositiveSeconds(
+      settings.maxPostDwellSeconds,
+      DEFAULT_SETTINGS.maxPostDwellSeconds
+    );
+    const minTopicCompletionSeconds = parsePositiveSeconds(
+      settings.minTopicCompletionSeconds,
+      DEFAULT_SETTINGS.minTopicCompletionSeconds
+    );
+    const maxTopicCompletionSeconds = parsePositiveSeconds(
+      settings.maxTopicCompletionSeconds,
+      DEFAULT_SETTINGS.maxTopicCompletionSeconds
+    );
+
+    return {
+      minPostDwellSeconds: Math.min(minPostDwellSeconds, maxPostDwellSeconds),
+      maxPostDwellSeconds: Math.max(minPostDwellSeconds, maxPostDwellSeconds),
+      minTopicCompletionSeconds: Math.min(
+        minTopicCompletionSeconds,
+        maxTopicCompletionSeconds
+      ),
+      maxTopicCompletionSeconds: Math.max(
+        minTopicCompletionSeconds,
+        maxTopicCompletionSeconds
+      ),
+      topicListPaths: normalizeTopicListPaths(settings.topicListPaths),
+    };
+  }
+
+  function getAutoReadSettings() {
+    const settings = localStorage.getItem(settingsStorageKey);
+    if (!settings) {
+      return normalizeSettings(DEFAULT_SETTINGS);
+    }
+
+    try {
+      return normalizeSettings(JSON.parse(settings));
+    } catch (error) {
+      localStorage.removeItem(settingsStorageKey);
+      return normalizeSettings(DEFAULT_SETTINGS);
+    }
+  }
+
+  function setAutoReadSettings(settings) {
+    localStorage.setItem(
+      settingsStorageKey,
+      JSON.stringify(normalizeSettings(settings))
+    );
+  }
+
+  function getConfiguredTopicListPaths() {
+    return getAutoReadSettings().topicListPaths;
+  }
+
+  function getActiveTopicListIndex() {
+    const paths = getConfiguredTopicListPaths();
+    const index = Number(localStorage.getItem(activeTopicListIndexStorageKey));
+    return Number.isInteger(index) && index >= 0 && index < paths.length
+      ? index
+      : 0;
+  }
+
+  function setActiveTopicListIndex(index) {
+    const paths = getConfiguredTopicListPaths();
+    const boundedIndex =
+      Number.isInteger(index) && index >= 0 && index < paths.length ? index : 0;
+    localStorage.setItem(activeTopicListIndexStorageKey, String(boundedIndex));
+  }
+
+  function getCurrentTopicListPath() {
+    const paths = getConfiguredTopicListPaths();
+    return paths[getActiveTopicListIndex()] || topicListPath;
+  }
+
+  function buildTopicListUrl(path = getCurrentTopicListPath()) {
+    return `${BASE_URL}${path}`;
+  }
+
+  function getCurrentTopicListUrl() {
+    return buildTopicListUrl();
+  }
+
+  function getExpectedTopicListUrl() {
+    return localStorage.getItem(expectedReturnUrlStorageKey) || getCurrentTopicListUrl();
+  }
+
+  function getReadingProfileFromSettings() {
+    const settings = getAutoReadSettings();
+    return {
+      ...AutoReadCore.DEFAULT_READING_PROFILE,
+      minPostDwellMs: Math.round(settings.minPostDwellSeconds * 1000),
+      maxPostDwellMs: Math.round(settings.maxPostDwellSeconds * 1000),
+      minTopicCompletionDelayMs: Math.round(
+        settings.minTopicCompletionSeconds * 1000
+      ),
+      maxTopicCompletionDelayMs: Math.round(
+        settings.maxTopicCompletionSeconds * 1000
+      ),
+    };
+  }
+
   function getAutoReadDiagnosticState(extra = {}) {
     return {
       url: window.location.href,
@@ -1365,6 +1527,8 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       lastTopicClickUrl: localStorage.getItem(lastTopicClickUrlStorageKey),
       returningTopicId: localStorage.getItem(returningTopicIdStorageKey),
       returningStartedAt: localStorage.getItem(returningStartedAtStorageKey),
+      activeTopicListIndex: localStorage.getItem(activeTopicListIndexStorageKey),
+      topicListPaths: getConfiguredTopicListPaths(),
       timingFailures: timingRequestMonitor.getConsecutiveFailures(),
       ...extra,
     };
@@ -1509,7 +1673,8 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   }
 
   function isTopicListPage() {
-    return window.location.pathname.replace(/\/+$/, "") === topicListPath;
+    const pathname = window.location.pathname.replace(/\/+$/, "") || "/";
+    return getConfiguredTopicListPaths().includes(pathname);
   }
 
   function getCurrentTopicSessionKey() {
@@ -1628,9 +1793,67 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   }
 
   function recordCurrentTopicRead() {
-    recordRecentReadTopic(
-      AutoReadCore.getTopicIdFromPathname(window.location.pathname)
+    const topicId = AutoReadCore.getTopicIdFromPathname(window.location.pathname);
+    recordRecentReadTopic(topicId);
+    recordVisitedTopic(topicId);
+  }
+
+  function getVisitedTopics() {
+    const visitedTopics = localStorage.getItem(visitedTopicStorageKey);
+    if (!visitedTopics) {
+      return {};
+    }
+
+    try {
+      const parsedTopics = JSON.parse(visitedTopics);
+      return parsedTopics && typeof parsedTopics === "object" ? parsedTopics : {};
+    } catch (error) {
+      localStorage.removeItem(visitedTopicStorageKey);
+      return {};
+    }
+  }
+
+  function pruneVisitedTopics(visitedTopics = getVisitedTopics()) {
+    const now = Date.now();
+    const entries = Object.entries(visitedTopics)
+      .map(([topicId, timestamp]) => [topicId, Number(timestamp)])
+      .filter(
+        ([topicId, timestamp]) =>
+          topicId &&
+          Number.isFinite(timestamp) &&
+          now - timestamp <= visitedTopicTtlMs
+      )
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, visitedTopicLimit);
+
+    return Object.fromEntries(entries);
+  }
+
+  function setVisitedTopics(visitedTopics) {
+    localStorage.setItem(
+      visitedTopicStorageKey,
+      JSON.stringify(pruneVisitedTopics(visitedTopics))
     );
+  }
+
+  function recordVisitedTopic(topicId) {
+    if (topicId === null) {
+      return;
+    }
+
+    const visitedTopics = pruneVisitedTopics();
+    visitedTopics[String(topicId)] = Date.now();
+    setVisitedTopics(visitedTopics);
+  }
+
+  function isVisitedTopicId(topicId) {
+    if (topicId === null) {
+      return false;
+    }
+
+    const visitedTopics = pruneVisitedTopics();
+    setVisitedTopics(visitedTopics);
+    return Object.prototype.hasOwnProperty.call(visitedTopics, String(topicId));
   }
 
   function markReturningToTopicList() {
@@ -1641,8 +1864,9 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
 
     localStorage.setItem(returningTopicIdStorageKey, String(topicId));
     localStorage.setItem(returningStartedAtStorageKey, Date.now().toString());
+    const topicListUrl = getExpectedTopicListUrl();
     localStorage.setItem(expectedReturnUrlStorageKey, topicListUrl);
-    logAutoReadDiagnostic("return-to-topic-list-marked", { topicId });
+    logAutoReadDiagnostic("return-to-topic-list-marked", { topicId, topicListUrl });
   }
 
   function clearReturningToTopicList(reason) {
@@ -1676,6 +1900,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   }
 
   function fallbackToTopicListAfterReturnBounce() {
+    const topicListUrl = getExpectedTopicListUrl();
     logAutoReadDiagnostic("return-to-topic-list-bounced-to-topic", {
       topicListUrl,
     });
@@ -1693,7 +1918,8 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     const topicId = getTopicIdFromLink(link);
     if (
       topicId === null ||
-      abandonedTopicTracker.isTopicAbandoned({ id: topicId })
+      abandonedTopicTracker.isTopicAbandoned({ id: topicId }) ||
+      isVisitedTopicId(topicId)
     ) {
       return false;
     }
@@ -1724,9 +1950,45 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   function getFirstUnreadTopicListLink() {
     return (
       getTopicListLinks().find(
-        (link) => !isRecentlyReadTopicId(getTopicIdFromLink(link))
+        (link) =>
+          !isRecentlyReadTopicId(getTopicIdFromLink(link)) &&
+          !isVisitedTopicId(getTopicIdFromLink(link))
       ) || null
     );
+  }
+
+  function syncActiveTopicListIndexFromLocation() {
+    const pathname = window.location.pathname.replace(/\/+$/, "") || "/";
+    const index = getConfiguredTopicListPaths().indexOf(pathname);
+    if (index >= 0) {
+      setActiveTopicListIndex(index);
+      return index;
+    }
+
+    return getActiveTopicListIndex();
+  }
+
+  function moveToNextTopicList() {
+    const paths = getConfiguredTopicListPaths();
+    const currentIndex = getActiveTopicListIndex();
+    const nextIndex = currentIndex + 1;
+
+    if (nextIndex >= paths.length) {
+      logAutoReadDiagnostic("all-topic-lists-empty", { paths });
+      return autoReadingSession.stop("所有配置列表均无可读主题，已停止自动阅读。");
+    }
+
+    setActiveTopicListIndex(nextIndex);
+    topicListWaitAttempts = 0;
+    const nextTopicListUrl = buildTopicListUrl(paths[nextIndex]);
+    logAutoReadDiagnostic("switch-topic-list", {
+      from: paths[currentIndex],
+      to: paths[nextIndex],
+      nextTopicListUrl,
+    });
+    window.location.href = nextTopicListUrl;
+
+    return { status: "switching-topic-list", url: nextTopicListUrl };
   }
 
   function refreshStaleTopicList(topicId) {
@@ -1740,6 +2002,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   }
 
   function anchorTopicListReturnUrl(topicUrl) {
+    const topicListUrl = getCurrentTopicListUrl();
     localStorage.setItem(expectedReturnUrlStorageKey, topicListUrl);
     localStorage.setItem(lastTopicClickUrlStorageKey, topicUrl);
 
@@ -1787,6 +2050,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
 
   function openFirstTopicFromList() {
     logAutoReadDiagnostic("open-first-topic-from-list-enter");
+    syncActiveTopicListIndexFromLocation();
     if (openingTopic) {
       const topicClickTimedOut =
         topicClickStartedAt !== null && Date.now() - topicClickStartedAt > 8000;
@@ -1816,8 +2080,9 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       if (topicListWaitAttempts >= maxTopicListWaitAttempts) {
         logAutoReadDiagnostic("topic-list-empty-stop", {
           topicListWaitAttempts,
+          topicListUrl: getCurrentTopicListUrl(),
         });
-        return autoReadingSession.stop("new 页面没有可点击主题，已停止自动阅读。");
+        return moveToNextTopicList();
       }
 
       logAutoReadDiagnostic("topic-list-waiting", {
@@ -1832,10 +2097,12 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     topicClickStartedAt = Date.now();
     localStorage.setItem("navigatingToNextTopic", "true");
     topicLink.scrollIntoView({ block: "center" });
+    const topicId = getTopicIdFromLink(topicLink);
     logAutoReadDiagnostic("topic-click", {
       topicUrl: topicLink.href,
-      topicId: getTopicIdFromLink(topicLink),
+      topicId,
     });
+    recordVisitedTopic(topicId);
     anchorTopicListReturnUrl(topicLink.href);
     topicLink.click();
     scheduleActiveRouteCheck(topicListNavigationDelay);
@@ -1844,6 +2111,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   }
 
   function goToTopicList() {
+    const topicListUrl = getCurrentTopicListUrl();
     logAutoReadDiagnostic("go-to-topic-list-enter", { topicListUrl });
     if (window.location.href === topicListUrl) {
       scheduleActiveRouteCheck(topicListNavigationDelay);
@@ -1855,6 +2123,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   }
 
   function goBackToTopicList() {
+    const topicListUrl = getExpectedTopicListUrl();
     logAutoReadDiagnostic("go-back-to-topic-list-enter", { topicListUrl });
     markReturningToTopicList();
     recordCurrentTopicRead();
@@ -1866,7 +2135,9 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     if (window.history.length > 1) {
       window.history.back();
       logAutoReadDiagnostic("history-back-called");
-      scheduleActiveRouteCheck(topicListNavigationDelay + topicListReturnFallbackDelay);
+      scheduleActiveRouteCheck(
+        topicListNavigationDelay + topicListReturnFallbackDelay
+      );
       return { status: "back-to-topic-list" };
     }
 
@@ -1910,6 +2181,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     }
 
     if (isTopicListPage()) {
+      syncActiveTopicListIndexFromLocation();
       clearReturningToTopicList("topic-list-page");
       logAutoReadDiagnostic("continue-flow-topic-list-page");
       return openFirstTopicFromList();
@@ -2249,6 +2521,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
         logAutoReadDiagnostic("advance-session", { reason });
         return goBackToTopicList();
       },
+      readingProfile: getReadingProfileFromSettings(),
     });
   }
 
@@ -2349,19 +2622,189 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       }, index * randomDelay); // 每次点赞的延迟为随机值
     });
   }
+
+  function applyButtonStyle(controlButton, bottomPx) {
+    controlButton.style.position = "fixed";
+    controlButton.style.bottom = `${bottomPx}px`;
+    controlButton.style.left = "10px";
+    controlButton.style.zIndex = "1000";
+    controlButton.style.backgroundColor = "#f0f0f0";
+    controlButton.style.color = "#000";
+    controlButton.style.border = "1px solid #ddd";
+    controlButton.style.padding = "5px 10px";
+    controlButton.style.borderRadius = "5px";
+    controlButton.style.cursor = "pointer";
+  }
+
+  function createSettingsField({ labelText, inputType = "number", value }) {
+    const label = document.createElement("label");
+    label.style.display = "block";
+    label.style.marginBottom = "10px";
+    label.style.fontSize = "13px";
+    label.style.color = "#222";
+
+    const labelSpan = document.createElement("span");
+    labelSpan.textContent = labelText;
+    labelSpan.style.display = "block";
+    labelSpan.style.marginBottom = "4px";
+
+    const input =
+      inputType === "textarea"
+        ? document.createElement("textarea")
+        : document.createElement("input");
+    if (inputType !== "textarea") {
+      input.type = inputType;
+      input.step = "0.1";
+      input.min = "0.1";
+    }
+    input.value = value;
+    input.style.width = "100%";
+    input.style.boxSizing = "border-box";
+    input.style.border = "1px solid #ccc";
+    input.style.borderRadius = "4px";
+    input.style.padding = "6px";
+    input.style.fontSize = "13px";
+    if (inputType === "textarea") {
+      input.rows = 4;
+      input.style.resize = "vertical";
+    }
+
+    label.appendChild(labelSpan);
+    label.appendChild(input);
+
+    return { label, input };
+  }
+
+  function openSettingsDialog() {
+    const existingDialog = document.getElementById("auto-read-settings-dialog");
+    if (existingDialog) {
+      existingDialog.remove();
+    }
+
+    const settings = getAutoReadSettings();
+    const overlay = document.createElement("div");
+    overlay.id = "auto-read-settings-dialog";
+    overlay.style.position = "fixed";
+    overlay.style.inset = "0";
+    overlay.style.zIndex = "10000";
+    overlay.style.background = "rgba(0, 0, 0, 0.35)";
+    overlay.style.display = "flex";
+    overlay.style.alignItems = "center";
+    overlay.style.justifyContent = "center";
+
+    const panel = document.createElement("div");
+    panel.style.width = "360px";
+    panel.style.maxWidth = "calc(100vw - 24px)";
+    panel.style.background = "#fff";
+    panel.style.color = "#222";
+    panel.style.border = "1px solid #ccc";
+    panel.style.borderRadius = "6px";
+    panel.style.padding = "14px";
+    panel.style.boxShadow = "0 8px 24px rgba(0, 0, 0, 0.2)";
+
+    const title = document.createElement("div");
+    title.textContent = "Auto Read 设置";
+    title.style.fontSize = "16px";
+    title.style.fontWeight = "600";
+    title.style.marginBottom = "12px";
+
+    const minPostField = createSettingsField({
+      labelText: "每个 post 最小停留秒数",
+      value: settings.minPostDwellSeconds,
+    });
+    const maxPostField = createSettingsField({
+      labelText: "每个 post 最大停留秒数",
+      value: settings.maxPostDwellSeconds,
+    });
+    const minTopicField = createSettingsField({
+      labelText: "topic 读完后最小停留秒数",
+      value: settings.minTopicCompletionSeconds,
+    });
+    const maxTopicField = createSettingsField({
+      labelText: "topic 读完后最大停留秒数",
+      value: settings.maxTopicCompletionSeconds,
+    });
+    const topicListField = createSettingsField({
+      labelText: "列表路径（每行一个）",
+      inputType: "textarea",
+      value: settings.topicListPaths.join("\n"),
+    });
+
+    const actions = document.createElement("div");
+    actions.style.display = "flex";
+    actions.style.gap = "8px";
+    actions.style.justifyContent = "flex-end";
+    actions.style.marginTop = "12px";
+
+    const saveButton = document.createElement("button");
+    saveButton.textContent = "保存";
+    const clearVisitedButton = document.createElement("button");
+    clearVisitedButton.textContent = "清空已读";
+    const cancelButton = document.createElement("button");
+    cancelButton.textContent = "取消";
+
+    [saveButton, clearVisitedButton, cancelButton].forEach((actionButton) => {
+      actionButton.style.border = "1px solid #bbb";
+      actionButton.style.background = "#f7f7f7";
+      actionButton.style.color = "#222";
+      actionButton.style.borderRadius = "4px";
+      actionButton.style.padding = "6px 10px";
+      actionButton.style.cursor = "pointer";
+    });
+
+    cancelButton.addEventListener("click", () => {
+      overlay.remove();
+    });
+
+    clearVisitedButton.addEventListener("click", () => {
+      localStorage.removeItem(visitedTopicStorageKey);
+      logAutoReadDiagnostic("visited-topics-cleared");
+    });
+
+    saveButton.addEventListener("click", () => {
+      const nextSettings = normalizeSettings({
+        minPostDwellSeconds: minPostField.input.value,
+        maxPostDwellSeconds: maxPostField.input.value,
+        minTopicCompletionSeconds: minTopicField.input.value,
+        maxTopicCompletionSeconds: maxTopicField.input.value,
+        topicListPaths: topicListField.input.value.split(/\n+/),
+      });
+
+      if (nextSettings.topicListPaths.length === 0) {
+        window.alert("至少需要一个列表路径。");
+        return;
+      }
+
+      setAutoReadSettings(nextSettings);
+      setActiveTopicListIndex(0);
+      logAutoReadDiagnostic("settings-saved", nextSettings);
+      overlay.remove();
+    });
+
+    actions.appendChild(clearVisitedButton);
+    actions.appendChild(cancelButton);
+    actions.appendChild(saveButton);
+    panel.appendChild(title);
+    panel.appendChild(minPostField.label);
+    panel.appendChild(maxPostField.label);
+    panel.appendChild(minTopicField.label);
+    panel.appendChild(maxTopicField.label);
+    panel.appendChild(topicListField.label);
+    panel.appendChild(actions);
+    overlay.appendChild(panel);
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        overlay.remove();
+      }
+    });
+    document.body.appendChild(overlay);
+  }
+
   const button = document.createElement("button");
   // 初始化按钮文本基于当前的阅读状态
   button.textContent =
     localStorage.getItem("read") === "true" ? "停止阅读" : "开始阅读";
-  button.style.position = "fixed";
-  button.style.bottom = "10px"; // 之前是 top
-  button.style.left = "10px"; // 之前是 right
-  button.style.zIndex = 1000;
-  button.style.backgroundColor = "#f0f0f0"; // 浅灰色背景
-  button.style.color = "#000"; // 黑色文本
-  button.style.border = "1px solid #ddd"; // 浅灰色边框
-  button.style.padding = "5px 10px"; // 内边距
-  button.style.borderRadius = "5px"; // 圆角
+  applyButtonStyle(button, 10);
   document.body.appendChild(button);
 
   autoReadingSession = AutoReadCore.createAutoReadingSession({
@@ -2401,6 +2844,9 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     }
 
     autoReadingSession.startCurrentTopic();
+    setActiveTopicListIndex(
+      isTopicListPage() ? syncActiveTopicListIndexFromLocation() : 0
+    );
     continueAutoReadFlow();
   };
 
@@ -2437,15 +2883,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   toggleAutoLikeButton.textContent = autoLikeController.isEnabled()
     ? "禁用自动点赞"
     : "启用自动点赞";
-  toggleAutoLikeButton.style.position = "fixed";
-  toggleAutoLikeButton.style.bottom = "50px"; // 之前是 top，且与另一个按钮错开位置
-  toggleAutoLikeButton.style.left = "10px"; // 之前是 right
-  toggleAutoLikeButton.style.zIndex = "1000";
-  toggleAutoLikeButton.style.backgroundColor = "#f0f0f0"; // 浅灰色背景
-  toggleAutoLikeButton.style.color = "#000"; // 黑色文本
-  toggleAutoLikeButton.style.border = "1px solid #ddd"; // 浅灰色边框
-  toggleAutoLikeButton.style.padding = "5px 10px"; // 内边距
-  toggleAutoLikeButton.style.borderRadius = "5px"; // 圆角
+  applyButtonStyle(toggleAutoLikeButton, 50);
   document.body.appendChild(toggleAutoLikeButton);
 
   // 为按钮添加点击事件处理函数
@@ -2456,6 +2894,12 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       ? "禁用自动点赞"
       : "启用自动点赞";
   });
+
+  const settingsButton = document.createElement("button");
+  settingsButton.textContent = "阅读设置";
+  applyButtonStyle(settingsButton, 90);
+  settingsButton.addEventListener("click", openSettingsDialog);
+  document.body.appendChild(settingsButton);
 
   if (document.readyState === "loading") {
     window.addEventListener("load", initAutoRead);
