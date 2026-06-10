@@ -33,7 +33,7 @@ const AutoReadCore = (() => {
     bottomDelayMs: 10000,
     minTopicCompletionDelayMs: 6000,
     maxTopicCompletionDelayMs: 14000,
-    maxConsecutiveTimingFailures: 12,
+    maxConsecutiveTimingFailures: 24,
     minPostDwellMs: 250,
     maxPostDwellMs: 1200,
     postDwellMsPerCharacter: 1,
@@ -63,6 +63,7 @@ const AutoReadCore = (() => {
     timingFailuresPause: "阅读计时请求连续失败，自动阅读已暂停。",
     unfocusedPagePause: "页面未聚焦，自动阅读已暂停。",
   };
+  const DEFAULT_TRANSIENT_READ_STATE_RECOVERY_DELAY_MS = 3000;
 
   function normalizeBaseUrl(baseUrl) {
     return String(baseUrl).replace(/\/+$/, "");
@@ -754,17 +755,19 @@ const AutoReadCore = (() => {
     isPageHidden = () => false,
     hasPageFocus = () => true,
     getTimingRequestTrust = () => ({ trusted: true }),
+    pauseOnHiddenTab = true,
+    pauseOnUnfocusedPage = true,
   } = {}) {
     return {
       getTrustState() {
-        if (isPageHidden()) {
+        if (pauseOnHiddenTab && isPageHidden()) {
           return {
             trusted: false,
             reason: READ_STATE_PAUSE_REASONS.hiddenTab,
           };
         }
 
-        if (!hasPageFocus()) {
+        if (pauseOnUnfocusedPage && !hasPageFocus()) {
           return {
             trusted: false,
             reason: READ_STATE_PAUSE_REASONS.unfocusedPage,
@@ -829,6 +832,10 @@ const AutoReadCore = (() => {
 
       getConsecutiveFailures() {
         return consecutiveFailures;
+      },
+
+      resetFailures() {
+        consecutiveFailures = 0;
       },
 
       getTrustState() {
@@ -1245,6 +1252,7 @@ const AutoReadCore = (() => {
     createReadingQueueStorage,
     getTopicIdFromPathname,
     getTopicSessionKeyFromPathname,
+    DEFAULT_TRANSIENT_READ_STATE_RECOVERY_DELAY_MS,
     getEligibleTopicsFromSource,
     getReadPosition,
     getTopicsFromTopicListPayload,
@@ -1304,6 +1312,13 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   const recentReadTopicStorageKey = "recentReadTopicIds";
   const recentReadTopicLimit = 2;
   const staleTopicListRefreshStorageKey = "staleTopicListRefreshTopicId";
+  const diagnosticLogStorageKey = "autoReadDiagnosticLogs";
+  const diagnosticLogLimit = 200;
+  const expectedReturnUrlStorageKey = "autoReadLastExpectedReturnUrl";
+  const lastTopicClickUrlStorageKey = "autoReadLastTopicClickUrl";
+  const returningTopicIdStorageKey = "autoReadReturningTopicId";
+  const returningStartedAtStorageKey = "autoReadReturningStartedAt";
+  const topicListReturnFallbackDelay = 2500;
   const likeLimit = 50;
   const readingQueueStorage = AutoReadCore.createReadingQueueStorage({
     storage: localStorage,
@@ -1334,6 +1349,105 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   });
 
   console.log("脚本正在运行在: " + siteConfig.siteName, BASE_URL);
+  function getAutoReadDiagnosticState(extra = {}) {
+    return {
+      url: window.location.href,
+      pathname: window.location.pathname,
+      referrer: document.referrer || "",
+      historyLength: window.history.length,
+      read: localStorage.getItem("read"),
+      hidden: document.hidden === true,
+      hasFocus:
+        typeof document.hasFocus === "function" ? document.hasFocus() : null,
+      openingTopic,
+      navigatingToNextTopic: localStorage.getItem("navigatingToNextTopic"),
+      expectedReturnUrl: localStorage.getItem(expectedReturnUrlStorageKey),
+      lastTopicClickUrl: localStorage.getItem(lastTopicClickUrlStorageKey),
+      returningTopicId: localStorage.getItem(returningTopicIdStorageKey),
+      returningStartedAt: localStorage.getItem(returningStartedAtStorageKey),
+      timingFailures: timingRequestMonitor.getConsecutiveFailures(),
+      ...extra,
+    };
+  }
+
+  function logAutoReadDiagnostic(eventName, extra = {}) {
+    const state = getAutoReadDiagnosticState(extra);
+    console.log(
+      `[AutoReadDiag] ${eventName}`,
+      state
+    );
+    persistAutoReadDiagnostic(eventName, state);
+  }
+
+  function getPersistedAutoReadDiagnostics() {
+    const logs = localStorage.getItem(diagnosticLogStorageKey);
+    if (!logs) {
+      return [];
+    }
+
+    try {
+      const parsedLogs = JSON.parse(logs);
+      return Array.isArray(parsedLogs) ? parsedLogs : [];
+    } catch (error) {
+      localStorage.removeItem(diagnosticLogStorageKey);
+      return [];
+    }
+  }
+
+  function persistAutoReadDiagnostic(eventName, state) {
+    try {
+      const logs = getPersistedAutoReadDiagnostics();
+      logs.push({
+        at: new Date().toISOString(),
+        event: eventName,
+        state,
+      });
+      localStorage.setItem(
+        diagnosticLogStorageKey,
+        JSON.stringify(logs.slice(-diagnosticLogLimit))
+      );
+    } catch (error) {
+      console.warn("[AutoReadDiag] failed to persist diagnostic log", error);
+    }
+  }
+
+  window.AutoReadDiag = {
+    dump() {
+      return getPersistedAutoReadDiagnostics();
+    },
+    clear() {
+      localStorage.removeItem(diagnosticLogStorageKey);
+      console.log("[AutoReadDiag] cleared");
+    },
+  };
+
+  function isTransientReadStatePause(reason) {
+    return (
+      reason === AutoReadCore.READ_STATE_PAUSE_REASONS.hiddenTab ||
+      reason === AutoReadCore.READ_STATE_PAUSE_REASONS.unfocusedPage ||
+      reason === AutoReadCore.READ_STATE_PAUSE_REASONS.timingFailures
+    );
+  }
+
+  function recoverFromTransientReadStatePause(reason) {
+    if (!autoReadingSession || !autoReadingSession.isActive()) {
+      return;
+    }
+
+    if (!isTransientReadStatePause(reason)) {
+      return;
+    }
+
+    logAutoReadDiagnostic("transient-pause-retry-scheduled", { reason });
+
+    if (reason === AutoReadCore.READ_STATE_PAUSE_REASONS.timingFailures) {
+      timingRequestMonitor.resetFailures();
+    }
+
+    scheduleActiveRouteCheck(
+      AutoReadCore.DEFAULT_TRANSIENT_READ_STATE_RECOVERY_DELAY_MS
+    );
+  }
   //1.进入网页 https://<supported-site>/t/topic/数字（1，2，3，4）
   //2.使滚轮均衡的往下移动模拟刷文章
   // 检查是否是第一次运行脚本
@@ -1382,6 +1496,8 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     hasPageFocus: () =>
       typeof document.hasFocus === "function" ? document.hasFocus() : true,
     getTimingRequestTrust: timingRequestMonitor.getTrustState,
+    pauseOnHiddenTab: false,
+    pauseOnUnfocusedPage: false,
   });
 
   function isReadingEnabled() {
@@ -1419,7 +1535,17 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
 
   let autoReadingSession = null;
 
+  function pauseAutoReadingForReason(reason, options = {}) {
+    logAutoReadDiagnostic("pause", { reason });
+    const result = autoReadingSession.pause(reason, options);
+    recoverFromTransientReadStatePause(reason);
+    return result;
+  }
+
   function continueAfterTrustedPageState() {
+    logAutoReadDiagnostic("resume-after-trusted-state", {
+      reason: autoReadingSession.getPauseReason(),
+    });
     autoReadingSession.resume();
     continueAutoReadFlow();
   }
@@ -1431,7 +1557,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
 
     const readStateTrust = readStateTrustGuard.getTrustState();
     if (readStateTrust.trusted === false) {
-      autoReadingSession.pause(readStateTrust.reason);
+      pauseAutoReadingForReason(readStateTrust.reason);
       return;
     }
 
@@ -1445,11 +1571,13 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   }
 
   function scheduleActiveRouteCheck(delayMs = topicListNavigationDelay) {
+    logAutoReadDiagnostic("route-check-scheduled", { delayMs });
     if (routeCheckTimeout !== null) {
       clearTimeout(routeCheckTimeout);
     }
     routeCheckTimeout = setTimeout(() => {
       routeCheckTimeout = null;
+      logAutoReadDiagnostic("route-check-fired");
       continueAutoReadFlow();
     }, delayMs);
   }
@@ -1503,6 +1631,58 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     recordRecentReadTopic(
       AutoReadCore.getTopicIdFromPathname(window.location.pathname)
     );
+  }
+
+  function markReturningToTopicList() {
+    const topicId = AutoReadCore.getTopicIdFromPathname(window.location.pathname);
+    if (topicId === null) {
+      return;
+    }
+
+    localStorage.setItem(returningTopicIdStorageKey, String(topicId));
+    localStorage.setItem(returningStartedAtStorageKey, Date.now().toString());
+    localStorage.setItem(expectedReturnUrlStorageKey, topicListUrl);
+    logAutoReadDiagnostic("return-to-topic-list-marked", { topicId });
+  }
+
+  function clearReturningToTopicList(reason) {
+    if (localStorage.getItem(returningTopicIdStorageKey) === null) {
+      return;
+    }
+
+    logAutoReadDiagnostic("return-to-topic-list-cleared", { reason });
+    localStorage.removeItem(returningTopicIdStorageKey);
+    localStorage.removeItem(returningStartedAtStorageKey);
+  }
+
+  function shouldFallbackToTopicListFromTopicPage() {
+    const returningTopicId = localStorage.getItem(returningTopicIdStorageKey);
+    if (returningTopicId === null) {
+      return false;
+    }
+
+    const currentTopicId = AutoReadCore.getTopicIdFromPathname(
+      window.location.pathname
+    );
+    if (currentTopicId !== returningTopicId) {
+      clearReturningToTopicList("different-topic");
+      return false;
+    }
+
+    const startedAt = Number(localStorage.getItem(returningStartedAtStorageKey));
+    const elapsedMs = Number.isFinite(startedAt) ? Date.now() - startedAt : null;
+
+    return elapsedMs === null || elapsedMs >= topicListReturnFallbackDelay;
+  }
+
+  function fallbackToTopicListAfterReturnBounce() {
+    logAutoReadDiagnostic("return-to-topic-list-bounced-to-topic", {
+      topicListUrl,
+    });
+    clearReturningToTopicList("fallback-navigation");
+    window.location.href = topicListUrl;
+
+    return { status: "fallback-topic-list-navigation", url: topicListUrl };
   }
 
   function isRecentlyReadTopicId(topicId) {
@@ -1559,6 +1739,29 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     return { status: "refreshing-stale-topic-list", topicId };
   }
 
+  function anchorTopicListReturnUrl(topicUrl) {
+    localStorage.setItem(expectedReturnUrlStorageKey, topicListUrl);
+    localStorage.setItem(lastTopicClickUrlStorageKey, topicUrl);
+
+    try {
+      window.history.pushState(
+        { autoReadReturnUrl: topicListUrl, autoReadTopicUrl: topicUrl },
+        document.title,
+        topicListUrl
+      );
+      logAutoReadDiagnostic("topic-list-return-anchor-pushed", {
+        topicUrl,
+        expectedReturnUrl: topicListUrl,
+      });
+    } catch (error) {
+      logAutoReadDiagnostic("topic-list-return-anchor-error", {
+        topicUrl,
+        expectedReturnUrl: topicListUrl,
+        message: error && error.message ? error.message : String(error),
+      });
+    }
+  }
+
   function chooseTopicListLink() {
     const firstTopicLink = getFirstTopicListLink();
     if (!firstTopicLink) {
@@ -1583,15 +1786,21 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   }
 
   function openFirstTopicFromList() {
+    logAutoReadDiagnostic("open-first-topic-from-list-enter");
     if (openingTopic) {
       const topicClickTimedOut =
         topicClickStartedAt !== null && Date.now() - topicClickStartedAt > 8000;
 
       if (!topicClickTimedOut) {
+        logAutoReadDiagnostic("topic-click-still-opening", {
+          elapsedMs:
+            topicClickStartedAt === null ? null : Date.now() - topicClickStartedAt,
+        });
         scheduleActiveRouteCheck(topicListNavigationDelay);
         return { status: "opening" };
       }
 
+      logAutoReadDiagnostic("topic-click-timeout");
       openingTopic = false;
       topicClickStartedAt = null;
     }
@@ -1605,9 +1814,15 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       topicListWaitAttempts += 1;
 
       if (topicListWaitAttempts >= maxTopicListWaitAttempts) {
+        logAutoReadDiagnostic("topic-list-empty-stop", {
+          topicListWaitAttempts,
+        });
         return autoReadingSession.stop("new 页面没有可点击主题，已停止自动阅读。");
       }
 
+      logAutoReadDiagnostic("topic-list-waiting", {
+        topicListWaitAttempts,
+      });
       scheduleActiveRouteCheck(topicListWaitDelay);
       return { status: "waiting-topic-list" };
     }
@@ -1617,6 +1832,11 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     topicClickStartedAt = Date.now();
     localStorage.setItem("navigatingToNextTopic", "true");
     topicLink.scrollIntoView({ block: "center" });
+    logAutoReadDiagnostic("topic-click", {
+      topicUrl: topicLink.href,
+      topicId: getTopicIdFromLink(topicLink),
+    });
+    anchorTopicListReturnUrl(topicLink.href);
     topicLink.click();
     scheduleActiveRouteCheck(topicListNavigationDelay);
 
@@ -1624,6 +1844,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   }
 
   function goToTopicList() {
+    logAutoReadDiagnostic("go-to-topic-list-enter", { topicListUrl });
     if (window.location.href === topicListUrl) {
       scheduleActiveRouteCheck(topicListNavigationDelay);
       return { status: "already-topic-list" };
@@ -1634,6 +1855,8 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
   }
 
   function goBackToTopicList() {
+    logAutoReadDiagnostic("go-back-to-topic-list-enter", { topicListUrl });
+    markReturningToTopicList();
     recordCurrentTopicRead();
     clearReadTimers();
     openingTopic = false;
@@ -1642,22 +1865,30 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
 
     if (window.history.length > 1) {
       window.history.back();
-      scheduleActiveRouteCheck(topicListNavigationDelay);
+      logAutoReadDiagnostic("history-back-called");
+      scheduleActiveRouteCheck(topicListNavigationDelay + topicListReturnFallbackDelay);
       return { status: "back-to-topic-list" };
     }
 
+    clearReturningToTopicList("no-history-fallback");
     window.location.href = topicListUrl;
+    logAutoReadDiagnostic("fallback-topic-list-navigation", { topicListUrl });
     return { status: "opening-topic-list", url: topicListUrl };
   }
 
   function continueAutoReadFlow() {
+    logAutoReadDiagnostic("continue-flow-enter", {
+      isTopicPage: isTopicPage(),
+      isTopicListPage: isTopicListPage(),
+    });
     if (!autoReadingSession || !autoReadingSession.isActive()) {
+      logAutoReadDiagnostic("continue-flow-inactive");
       return { status: "inactive" };
     }
 
     const readStateTrust = readStateTrustGuard.getTrustState();
     if (readStateTrust.trusted === false) {
-      return autoReadingSession.pause(readStateTrust.reason);
+      return pauseAutoReadingForReason(readStateTrust.reason);
     }
 
     if (autoReadingSession.getPauseReason() !== null) {
@@ -1665,6 +1896,11 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     }
 
     if (isTopicPage()) {
+      if (shouldFallbackToTopicListFromTopicPage()) {
+        return fallbackToTopicListAfterReturnBounce();
+      }
+
+      logAutoReadDiagnostic("continue-flow-topic-page");
       openingTopic = false;
       topicClickStartedAt = null;
       topicListWaitAttempts = 0;
@@ -1674,9 +1910,12 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     }
 
     if (isTopicListPage()) {
+      clearReturningToTopicList("topic-list-page");
+      logAutoReadDiagnostic("continue-flow-topic-list-page");
       return openFirstTopicFromList();
     }
 
+    logAutoReadDiagnostic("continue-flow-unknown-page");
     return goToTopicList();
   }
 
@@ -1968,7 +2207,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
       getReadStateTrust: readStateTrustGuard.getTrustState,
       clearTimers: clearReadTimers,
       pauseReading: (reason) =>
-        autoReadingSession.pause(reason, { timersAlreadyCleared: true }),
+        pauseAutoReadingForReason(reason, { timersAlreadyCleared: true }),
       isTopicReady: isTopicContentReady,
       shouldDelayTopicStart: topicStartDelayController.shouldDelayTopicStart,
       recordTopicStartDelay: topicStartDelayController.recordTopicStartDelay,
@@ -1990,18 +2229,24 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
         checkScrollTimeout = setTimeout(checkScroll, delayMs);
       },
       scheduleTopicCompletion: (delayMs, advance) => {
+        logAutoReadDiagnostic("topic-completion-scheduled", { delayMs });
         if (checkScrollTimeout !== null) {
           clearTimeout(checkScrollTimeout);
         }
         checkScrollTimeout = setTimeout(() => {
           checkScrollTimeout = null;
+          logAutoReadDiagnostic("topic-completion-fired");
           Promise.resolve(advance()).catch((error) => {
             console.error("延迟跳转到下一个主题失败", error);
+            logAutoReadDiagnostic("topic-completion-error", {
+              message: error && error.message ? error.message : String(error),
+            });
           });
         }, delayMs);
       },
       advanceSession: ({ reason } = {}) => {
         console.log(reason === "abandoned-topic" ? "中途跳过主题" : "已滚动到底部");
+        logAutoReadDiagnostic("advance-session", { reason });
         return goBackToTopicList();
       },
     });
@@ -2159,15 +2404,26 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     continueAutoReadFlow();
   };
 
-  document.addEventListener("visibilitychange", handleReadStateTrustChange);
-  window.addEventListener("focus", handleReadStateTrustChange);
-  window.addEventListener("blur", handleReadStateTrustChange);
+  document.addEventListener("visibilitychange", () => {
+    logAutoReadDiagnostic("visibilitychange");
+    handleReadStateTrustChange();
+  });
+  window.addEventListener("focus", () => {
+    logAutoReadDiagnostic("window-focus");
+    handleReadStateTrustChange();
+  });
+  window.addEventListener("blur", () => {
+    logAutoReadDiagnostic("window-blur");
+    handleReadStateTrustChange();
+  });
   window.addEventListener("popstate", () => {
+    logAutoReadDiagnostic("popstate");
     openingTopic = false;
     topicClickStartedAt = null;
     scheduleActiveRouteCheck(topicListNavigationDelay);
   });
   window.addEventListener("pageshow", () => {
+    logAutoReadDiagnostic("pageshow");
     openingTopic = false;
     topicClickStartedAt = null;
     if (isReadingEnabled()) {
