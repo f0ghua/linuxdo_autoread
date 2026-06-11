@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Read
 // @namespace    http://tampermonkey.net/
-// @version      1.4.14
+// @version      1.4.15
 // @description  自动阅读 Discourse 论坛文章
 // @author       liuweiqing
 // @match        https://linux.do/*
@@ -1329,7 +1329,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     maxPostDwellSeconds: 1.2,
     minTopicCompletionSeconds: 6,
     maxTopicCompletionSeconds: 14,
-    topicListPaths: [siteConfig.topicListPath],
+    topicListPaths: [siteConfig.topicListPath, "/latest"],
   };
   const readingQueueStorage = AutoReadCore.createReadingQueueStorage({
     storage: localStorage,
@@ -2682,6 +2682,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     }
 
     const settings = getAutoReadSettings();
+    const defaultSettings = normalizeSettings(DEFAULT_SETTINGS);
     const overlay = document.createElement("div");
     overlay.id = "auto-read-settings-dialog";
     overlay.style.position = "fixed";
@@ -2738,19 +2739,23 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
 
     const saveButton = document.createElement("button");
     saveButton.textContent = "保存";
+    const restoreDefaultsButton = document.createElement("button");
+    restoreDefaultsButton.textContent = "恢复默认";
     const clearVisitedButton = document.createElement("button");
     clearVisitedButton.textContent = "清空已读";
     const cancelButton = document.createElement("button");
     cancelButton.textContent = "取消";
 
-    [saveButton, clearVisitedButton, cancelButton].forEach((actionButton) => {
-      actionButton.style.border = "1px solid #bbb";
-      actionButton.style.background = "#f7f7f7";
-      actionButton.style.color = "#222";
-      actionButton.style.borderRadius = "4px";
-      actionButton.style.padding = "6px 10px";
-      actionButton.style.cursor = "pointer";
-    });
+    [saveButton, restoreDefaultsButton, clearVisitedButton, cancelButton].forEach(
+      (actionButton) => {
+        actionButton.style.border = "1px solid #bbb";
+        actionButton.style.background = "#f7f7f7";
+        actionButton.style.color = "#222";
+        actionButton.style.borderRadius = "4px";
+        actionButton.style.padding = "6px 10px";
+        actionButton.style.cursor = "pointer";
+      }
+    );
 
     cancelButton.addEventListener("click", () => {
       overlay.remove();
@@ -2759,6 +2764,17 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     clearVisitedButton.addEventListener("click", () => {
       localStorage.removeItem(visitedTopicStorageKey);
       logAutoReadDiagnostic("visited-topics-cleared");
+    });
+
+    restoreDefaultsButton.addEventListener("click", () => {
+      minPostField.input.value = defaultSettings.minPostDwellSeconds;
+      maxPostField.input.value = defaultSettings.maxPostDwellSeconds;
+      minTopicField.input.value = defaultSettings.minTopicCompletionSeconds;
+      maxTopicField.input.value = defaultSettings.maxTopicCompletionSeconds;
+      topicListField.input.value = defaultSettings.topicListPaths.join("\n");
+      setAutoReadSettings(defaultSettings);
+      setActiveTopicListIndex(0);
+      logAutoReadDiagnostic("settings-restored-defaults", defaultSettings);
     });
 
     saveButton.addEventListener("click", () => {
@@ -2782,6 +2798,7 @@ if (typeof module === "object" && module.exports && typeof window === "undefined
     });
 
     actions.appendChild(clearVisitedButton);
+    actions.appendChild(restoreDefaultsButton);
     actions.appendChild(cancelButton);
     actions.appendChild(saveButton);
     panel.appendChild(title);
